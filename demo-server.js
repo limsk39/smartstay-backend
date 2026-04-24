@@ -21,6 +21,9 @@ try {
   console.log('⚠️  알림 서비스 로드 실패 (콘솔 출력으로 대체):', e.message);
 }
 
+// Tuya 도어락 연동 로드
+const tuya = require('./tuya');
+
 const TOSS_SECRET_KEY = process.env.TOSS_SECRET_KEY || '';
 const IS_REAL_PAYMENT = TOSS_SECRET_KEY && !TOSS_SECRET_KEY.includes('여기에');
 
@@ -71,7 +74,7 @@ const ROOMS = [
     checkOutTime: '11:00',
     images: [],
     amenities: ['Wi-Fi', '에어컨', 'TV', '냉장고', '드라이기'],
-    tuyaDeviceId: 'DEMO-DEVICE-101'
+    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-101'
   },
   {
     id: 'room-201',
@@ -82,7 +85,7 @@ const ROOMS = [
     checkOutTime: '11:00',
     images: [],
     amenities: ['Wi-Fi', '에어컨', 'TV', '냉장고', '욕조', '드라이기', '전기포트'],
-    tuyaDeviceId: 'DEMO-DEVICE-201'
+    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-201'
   },
   {
     id: 'room-301',
@@ -93,7 +96,7 @@ const ROOMS = [
     checkOutTime: '11:00',
     images: [],
     amenities: ['Wi-Fi', '에어컨', 'TV', '냉장고', '욕조', '테라스', '미니바', '드라이기'],
-    tuyaDeviceId: 'DEMO-DEVICE-301'
+    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-301'
   }
 ];
 
@@ -266,6 +269,25 @@ app.post('/api/payments/confirm', async (req, res) => {
   console.log(`  도어락 비번: ${doorCode}#`);
   console.log(`  전달방법: ${reservation.notifyMethod} → ${reservation.guestPhone}\n`);
 
+  // 🔐 Tuya 임시 비밀번호 등록 (체크인~체크아웃 기간)
+  try {
+    const checkInTs  = Math.floor(new Date(reservation.checkIn).getTime()  / 1000);
+    const checkOutTs = Math.floor(new Date(reservation.checkOut).getTime() / 1000);
+    const tuyaResult = await tuya.createTempPassword(
+      room?.tuyaDeviceId,
+      reservation.guestName,
+      doorCode,
+      checkInTs,
+      checkOutTs
+    );
+    if (tuyaResult.success && !tuyaResult.simulated) {
+      reservation.tuyaPasswordId = tuyaResult.result?.id;
+      console.log(`[Tuya] 🔑 도어락 임시 비번 등록 완료 (${doorCode}#)`);
+    }
+  } catch (err) {
+    console.error('[Tuya] 임시 비번 등록 실패:', err.message);
+  }
+
   // 📱 문자 / 카카오 알림 발송
   if (sendDoorCode) {
     sendDoorCode({
@@ -419,6 +441,81 @@ app.patch('/api/admin/reservations/:id/status', adminAuth, (req, res) => {
   res.json({ success: true, reservation });
 });
 
+// ─── 관리자: 도어락 원격 제어 ────────────────────────────────
+
+// 원격 잠금 해제
+app.post('/api/admin/rooms/:id/unlock', adminAuth, async (req, res) => {
+  const room = ROOMS.find(r => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: '객실 없음' });
+
+  try {
+    const result = await tuya.remoteUnlock(room.tuyaDeviceId);
+    if (result.simulated) {
+      return res.json({ success: true, simulated: true, message: '시뮬레이션: 잠금 해제됨' });
+    }
+    res.json({ success: result.success, message: '도어락 해제됨' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 도어락 상태 확인
+app.get('/api/admin/rooms/:id/door-status', adminAuth, async (req, res) => {
+  const room = ROOMS.find(r => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: '객실 없음' });
+
+  try {
+    const result = await tuya.getDeviceStatus(room.tuyaDeviceId);
+    res.json({ success: true, status: result.result, tuyaEnabled: tuya.isTuyaEnabled() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 임시 비밀번호 목록 조회
+app.get('/api/admin/rooms/:id/temp-passwords', adminAuth, async (req, res) => {
+  const room = ROOMS.find(r => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: '객실 없음' });
+
+  try {
+    const result = await tuya.getTempPasswords(room.tuyaDeviceId);
+    res.json({ success: true, passwords: result.result || [], tuyaEnabled: tuya.isTuyaEnabled() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 체크아웃 시 임시 비밀번호 삭제
+app.post('/api/admin/reservations/:id/checkout', adminAuth, async (req, res) => {
+  const reservation = reservations.find(r => r.id === req.params.id);
+  if (!reservation) return res.status(404).json({ error: '예약 없음' });
+
+  const room = ROOMS.find(r => r.id === reservation.roomId);
+  reservation.status = 'checked_out';
+
+  // Tuya 임시 비번 삭제
+  if (reservation.tuyaPasswordId) {
+    try {
+      await tuya.deleteTempPassword(room?.tuyaDeviceId, reservation.tuyaPasswordId);
+      reservation.tuyaPasswordId = null;
+      console.log(`[Tuya] 🗑️ 체크아웃 임시 비번 삭제: ${reservation.guestName}`);
+    } catch (err) {
+      console.error('[Tuya] 임시 비번 삭제 실패:', err.message);
+    }
+  }
+
+  res.json({ success: true, reservation });
+});
+
+// Tuya 연동 상태 확인
+app.get('/api/admin/tuya/status', adminAuth, (req, res) => {
+  res.json({
+    enabled:  tuya.isTuyaEnabled(),
+    deviceId: process.env.TUYA_DEVICE_ID ? '설정됨' : '미설정',
+    message:  tuya.isTuyaEnabled() ? '✅ Tuya 도어락 연동 활성화' : '⚠️ 환경변수 미설정 (시뮬레이션 모드)',
+  });
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
@@ -447,7 +544,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('  📦 샘플 객실: 3개 등록됨');
   console.log(`  💳 결제: ${IS_REAL_PAYMENT ? '✅ 토스페이먼츠 실결제 모드' : '🧪 데모 모드 (자동 승인)'}`);
-  console.log('  🔐 도어락: 랜덤 6자리 자동 생성');
+  console.log(`  🔐 도어락: ${tuya.isTuyaEnabled() ? '✅ Tuya IoT 연동 (락프로 H5000)' : '🧪 시뮬레이션 모드 (TUYA 키 없음)'}`);
   console.log('  📱 SMS/카카오: 서버 콘솔에 출력');
   console.log('');
   console.log('  [데모 현황] http://localhost:3000/api/demo/status');
