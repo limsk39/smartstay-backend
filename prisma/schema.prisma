@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(uuid())
+  name         String
+  phone        String        @unique
+  email        String?
+  notifyMethod String        @default("sms") // "sms" | "kakao"
+  createdAt    DateTime      @default(now())
+  reservations Reservation[]
+}
+
+model Room {
+  id           String        @id @default(uuid())
+  name         String
+  description  String?
+  price        Int           // 원 단위
+  checkInTime  String        @default("15:00")
+  checkOutTime String        @default("11:00")
+  images       String[]
+  amenities    String[]
+  tuyaDeviceId String        // 투야 디바이스 ID
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  reservations Reservation[]
+}
+
+model Reservation {
+  id            String    @id @default(uuid())
+  userId        String?
+  user          User?     @relation(fields: [userId], references: [id])
+  roomId        String
+  room          Room      @relation(fields: [roomId], references: [id])
+  guestName     String
+  guestPhone    String
+  notifyMethod  String    @default("sms") // "sms" | "kakao"
+  checkIn       DateTime
+  checkOut      DateTime
+  totalPrice    Int
+  status         String    @default("pending") // pending | paid | checked_in | checked_out | cancelled
+  doorCode       String?
+  doorPasswordId String?   // 투야 API에서 발급된 비밀번호 ID (삭제 시 필요)
+  doorCodeSentAt DateTime?
+  createdAt      DateTime  @default(now())
+  payment       Payment?
+}
+
+model Payment {
+  id            String      @id @default(uuid())
+  reservationId String      @unique
+  reservation   Reservation @relation(fields: [reservationId], references: [id])
+  orderId       String      @unique
+  paymentKey    String?
+  amount        Int
+  status        String      @default("pending") // pending | done | cancelled | failed
+  method        String?
+  paidAt        DateTime?
+  createdAt     DateTime    @default(now())
+}
+
+model Admin {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  createdAt DateTime @default(now())
+}
