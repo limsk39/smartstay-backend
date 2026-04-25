@@ -538,15 +538,19 @@ app.get('/api/diag/tuya/specification', async (req, res) => {
   }
 });
 
-// 제품 스펙 조회 (product ID로)
-app.get('/api/diag/tuya/product-functions', async (req, res) => {
+// iot-03 경로로 테스트 명령 전송 (진단용)
+app.get('/api/diag/tuya/test-iot03', async (req, res) => {
   try {
-    const pid = req.query.pid || 'az16629743642179xB5K';
+    const did = process.env.TUYA_DEVICE_ID;
+    // 비밀번호 "123456" methodId=1 ASCII 인코딩 테스트
+    const rawHex = '020101063132333435366000000070000000';
     const [r1, r2] = await Promise.all([
-      tuya.tuyaRequest('GET', `/v1.0/iot-03/products/${pid}/functions`),
-      tuya.tuyaRequest('GET', `/v1.0/devices/${process.env.TUYA_DEVICE_ID}/information`),
+      tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+        commands: [{ code: 'unlock_method_create', value: rawHex }]
+      }),
+      tuya.tuyaRequest('GET', `/v1.0/iot-03/devices/${did}/functions`),
     ]);
-    res.json({ product_functions: r1, device_info: r2 });
+    res.json({ iot03_command: r1, iot03_functions: r2, rawHex });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

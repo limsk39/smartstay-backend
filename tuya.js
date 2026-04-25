@@ -152,9 +152,16 @@ async function createTempPassword(deviceId, name, password, effectiveTime, inval
 
   console.log(`[Tuya] unlock_method_create  methodId=${methodId}  raw=${rawHex}`);
 
-  const data = await tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+  // iot-03 경로(서브 디바이스용) 먼저 시도, 실패 시 구버전 경로 폴백
+  let data = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
     commands: [{ code: 'unlock_method_create', value: rawHex }]
   });
+  if (!data.success && data.code === 1108) {
+    console.log('[Tuya] iot-03 경로 실패 → 구버전 경로 재시도');
+    data = await tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: rawHex }]
+    });
+  }
 
   if (data.simulated) {
     console.log(`[Tuya 시뮬] 임시 비번 등록: ${name} / ${password}#  methodId=${methodId}`);
