@@ -538,6 +538,20 @@ app.get('/api/diag/tuya/specification', async (req, res) => {
   }
 });
 
+// 제품 스펙 조회 (product ID로)
+app.get('/api/diag/tuya/product-functions', async (req, res) => {
+  try {
+    const pid = req.query.pid || 'az16629743642179xB5K';
+    const [r1, r2] = await Promise.all([
+      tuya.tuyaRequest('GET', `/v1.0/iot-03/products/${pid}/functions`),
+      tuya.tuyaRequest('GET', `/v1.0/devices/${process.env.TUYA_DEVICE_ID}/information`),
+    ]);
+    res.json({ product_functions: r1, device_info: r2 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
