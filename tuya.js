@@ -254,4 +254,5 @@ module.exports = {
   remoteUnlock,
   getDeviceStatus,
   isTuyaEnabled,
+  tuyaRequest,
 };

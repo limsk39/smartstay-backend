@@ -516,6 +516,28 @@ app.get('/api/admin/tuya/status', adminAuth, (req, res) => {
   });
 });
 
+// 장치 DP 함수 스펙 조회 (진단용)
+app.get('/api/admin/tuya/functions', adminAuth, async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const data = await tuya.tuyaRequest('GET', `/v1.0/devices/${did}/functions`);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 장치 스펙 상세 조회 (진단용)
+app.get('/api/admin/tuya/specification', adminAuth, async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const data = await tuya.tuyaRequest('GET', `/v1.0/devices/${did}/specification`);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
