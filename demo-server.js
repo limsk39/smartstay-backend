@@ -726,41 +726,55 @@ app.get('/api/diag/tuya/spec-detail', async (req, res) => {
 });
 
 // ─── 핵심 진단 #7: 원격 열기 직접 테스트 (인증 없음) ─────────
-// remote_no_pd_setkey 로 등록된 원격잠금해제를 실제로 트리거
 app.get('/api/diag/tuya/unlock-now', async (req, res) => {
   try {
     const did = process.env.TUYA_DEVICE_ID;
-
-    // 여러 방식 동시 시도
     const [r1, r2, r3, r4] = await Promise.all([
-      // ① unlock_remote = 0
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, { commands: [{ code: 'unlock_remote', value: 0 }] }),
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, { commands: [{ code: 'open_close', value: true }] }),
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, { commands: [{ code: 'lock_motor_state', value: false }] }),
+      tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, { commands: [{ code: 'unlock_remote', value: 0 }] }),
+    ]);
+    res.json({
+      message: '문이 열리면 성공!',
+      unlock_remote_legacy: r1, open_close_legacy: r2,
+      lock_motor_false_legacy: r3, unlock_remote_iot03: r4,
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── 핵심 진단 #8: lock_motor_state = TRUE 로 열기 시도 ──────
+// false가 success였지만 안 열렸음 → true가 "열기" 신호일 수 있음
+app.get('/api/diag/tuya/motor-unlock', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+
+    // true / "unlock" / 1 등 여러 값 시도
+    const [r1, r2, r3, r4] = await Promise.all([
       tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
-        commands: [{ code: 'unlock_remote', value: 0 }]
+        commands: [{ code: 'lock_motor_state', value: true }]
       }),
-      // ② open_close = true
-      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
-        commands: [{ code: 'open_close', value: true }]
-      }),
-      // ③ lock_motor_state = false (잠금 해제)
-      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
-        commands: [{ code: 'lock_motor_state', value: false }]
-      }),
-      // ④ iot-03 경로로 unlock_remote
       tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
-        commands: [{ code: 'unlock_remote', value: 0 }]
+        commands: [{ code: 'lock_motor_state', value: true }]
       }),
+      // lock_motor_state 가 문자열 enum 일 수 있음: "unlock"
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+        commands: [{ code: 'lock_motor_state', value: 'unlock' }]
+      }).catch(e => ({ error: e.message })),
+      // reverse 시도
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+        commands: [{ code: 'lock_motor_state', value: 'reverse' }]
+      }).catch(e => ({ error: e.message })),
     ]);
 
     res.json({
-      message: '문이 열리면 성공!',
-      unlock_remote_legacy:     r1,
-      open_close_legacy:        r2,
-      lock_motor_false_legacy:  r3,
-      unlock_remote_iot03:      r4,
+      message: '지금 문이 열리면 성공! lock_motor_state=true 가 열기 신호입니다',
+      motor_true_legacy: r1,
+      motor_true_iot03:  r2,
+      motor_unlock_str:  r3,
+      motor_reverse_str: r4,
     });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
