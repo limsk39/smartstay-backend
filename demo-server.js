@@ -777,6 +777,26 @@ app.get('/api/diag/tuya/motor-unlock', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── 핵심 진단 #9: 4가지 포맷 변형 동시 테스트 ──────────────
+// V0=현재(Type 0x00) / V2=Type 0x03(비번)+ASCII / V3=짧은포맷 / V4=Tuya표준
+app.get('/api/diag/tuya/test-formats', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const password = req.query.pwd || '999111';
+    const baseSlot = parseInt(req.query.slot || '10', 10);
+
+    const results = await tuya.testAllFormats(did, password, baseSlot);
+
+    res.json({
+      instruction: `4가지 포맷으로 비번 ${password} 등록. 도어락에서 [${password}#] 시도 → 열리면 어떤 V가 맞는지 디바이스 로그에서 확인`,
+      results,
+      note: 'Tuya Developer Platform → Device Logs 에서 V0/V2/V3/V4 중 어느 것이 Report 응답을 받았는지 확인하세요',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {

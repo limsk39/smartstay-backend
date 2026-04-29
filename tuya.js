@@ -169,6 +169,99 @@ function buildDeleteRaw(keyIndex) {
   return buf.toString('hex').toUpperCase();
 }
 
+/**
+ * 변형 V2: Type=0x03 (비밀번호 타입), 같은 구조 - keypad 명시
+ */
+function buildCreateRawV2_TypePwd(password, effectiveTime, invalidTime, keyIndex) {
+  const startDate = new Date(effectiveTime * 1000);
+  const endDate   = new Date(invalidTime   * 1000);
+  const digits    = password.split('').map(d => parseInt(d, 10));
+  const N         = digits.length;
+  const buf       = Buffer.alloc(22 + N);
+  let off = 0;
+  const toBcd = v => ((Math.floor(v / 10) << 4) | (v % 10));
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = 0x03;  // ★ Type = 0x03 = 비밀번호(keypad password)
+  buf[off++] = toBcd(startDate.getUTCFullYear() - 2000);
+  buf[off++] = startDate.getUTCMonth() + 1;
+  buf[off++] = startDate.getUTCDate();
+  buf[off++] = startDate.getUTCHours();
+  buf[off++] = startDate.getUTCMinutes();
+  buf[off++] = startDate.getUTCSeconds();
+  buf[off++] = toBcd(endDate.getUTCFullYear() - 2000);
+  buf[off++] = endDate.getUTCMonth() + 1;
+  buf[off++] = endDate.getUTCDate();
+  buf[off++] = endDate.getUTCHours();
+  buf[off++] = endDate.getUTCMinutes();
+  buf[off++] = endDate.getUTCSeconds();
+  for (let i = 0; i < 5; i++) buf[off++] = 0x00;
+  buf[off++] = 0x00;
+  buf[off++] = N;
+  for (const d of digits) buf[off++] = d + 0x30;  // ASCII
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * 변형 V3: 짧은 포맷 [type][idx][len][ASCII][4B start BE][4B end BE]
+ */
+function buildCreateRawV3_Short(password, effectiveTime, invalidTime, keyIndex) {
+  const N = password.length;
+  const buf = Buffer.alloc(3 + N + 8);
+  let off = 0;
+  buf[off++] = 0x03;  // type=password
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = N;
+  for (const d of password) buf[off++] = d.charCodeAt(0);  // ASCII
+  buf.writeUInt32BE(effectiveTime, off); off += 4;
+  buf.writeUInt32BE(invalidTime, off); off += 4;
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * 변형 V4: Tuya 표준 [type][schedule][idx][len][ASCII][4B start BE][4B end BE]
+ */
+function buildCreateRawV4_TuyaStd(password, effectiveTime, invalidTime, keyIndex) {
+  const N = password.length;
+  const buf = Buffer.alloc(4 + N + 8);
+  let off = 0;
+  buf[off++] = 0x03;  // type = password
+  buf[off++] = 0x01;  // schedule = time-bound
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = N;
+  for (const d of password) buf[off++] = d.charCodeAt(0);  // ASCII
+  buf.writeUInt32BE(effectiveTime, off); off += 4;
+  buf.writeUInt32BE(invalidTime, off); off += 4;
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * 모든 변형 동시 테스트
+ */
+async function testAllFormats(deviceId, password, baseSlot) {
+  const did = deviceId || DEFAULT_DEVICE;
+  const now = Math.floor(Date.now() / 1000);
+  const eff = now - 86400;
+  const inv = now + 7 * 86400;
+
+  const variants = [
+    { name: 'V0_original',    hex: buildCreateRaw(password, eff, inv, baseSlot)         },
+    { name: 'V2_typePwd',     hex: buildCreateRawV2_TypePwd(password, eff, inv, baseSlot+1) },
+    { name: 'V3_short',       hex: buildCreateRawV3_Short(password, eff, inv, baseSlot+2)   },
+    { name: 'V4_tuyaStd',     hex: buildCreateRawV4_TuyaStd(password, eff, inv, baseSlot+3) },
+  ];
+
+  const results = {};
+  for (const v of variants) {
+    const r = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: v.hex }]
+    });
+    results[v.name] = { hex: v.hex, result: r };
+    console.log(`[Tuya 진단] ${v.name}: hex=${v.hex} success=${r.success}`);
+  }
+  return results;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 도어락 기능 함수
 // ─────────────────────────────────────────────────────────────
@@ -402,6 +495,7 @@ module.exports = {
   getDeviceInfo,
   testCreatePassword,
   testCreatePasswordASCII,
+  testAllFormats,
   isTuyaEnabled,
   tuyaRequest,
 };
