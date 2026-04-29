@@ -294,22 +294,65 @@ async function getDeviceInfo(deviceId) {
 }
 
 /**
- * 광범위 시간 + 고정 keyIndex 로 임시 비번 직접 등록 (진단용)
- * @param {string} deviceId  - 대상 장치 ID
- * @param {string} password  - 테스트 비밀번호 (기본 "123456")
- * @param {number} keyIndex  - 비번 슬롯 번호 (기본 1)
+ * Raw DP 빌드 (ASCII 숫자 버전: '1'=0x31, '2'=0x32 ...)
+ * 일부 락 펌웨어가 ASCII 인코딩 기대하는 경우 사용
  */
-async function testCreatePassword(deviceId, password = '123456', keyIndex = 1) {
+function buildCreateRawASCII(password, effectiveTime, invalidTime, keyIndex) {
+  const startDate = new Date(effectiveTime * 1000);
+  const endDate   = new Date(invalidTime   * 1000);
+  const digits    = password.split('').map(d => parseInt(d, 10));
+  const N         = digits.length;
+  const buf       = Buffer.alloc(22 + N);
+  let off = 0;
+
+  const toBcd = v => ((Math.floor(v / 10) << 4) | (v % 10));
+
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = 0x00;  // time-bound
+
+  buf[off++] = toBcd(startDate.getUTCFullYear() - 2000);
+  buf[off++] = startDate.getUTCMonth() + 1;
+  buf[off++] = startDate.getUTCDate();
+  buf[off++] = startDate.getUTCHours();
+  buf[off++] = startDate.getUTCMinutes();
+  buf[off++] = startDate.getUTCSeconds();
+
+  buf[off++] = toBcd(endDate.getUTCFullYear() - 2000);
+  buf[off++] = endDate.getUTCMonth() + 1;
+  buf[off++] = endDate.getUTCDate();
+  buf[off++] = endDate.getUTCHours();
+  buf[off++] = endDate.getUTCMinutes();
+  buf[off++] = endDate.getUTCSeconds();
+
+  for (let i = 0; i < 5; i++) buf[off++] = 0x00;
+  buf[off++] = 0x00;  // unlimited
+  buf[off++] = N;     // password length
+
+  // ★ ASCII 인코딩: '0'=0x30, '1'=0x31 ... '9'=0x39
+  for (const d of digits) buf[off++] = d + 0x30;
+
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * 광범위 시간 + 고정 keyIndex 로 임시 비번 직접 등록 (진단용)
+ * @param {string} deviceId     - 대상 장치 ID
+ * @param {string} password     - 테스트 비밀번호 (기본 "123456")
+ * @param {number} keyIndex     - 비번 슬롯 번호 (기본 1)
+ * @param {number} effectiveTime - 유효시작 Unix초 (기본 now-7days)
+ * @param {number} invalidTime   - 유효종료 Unix초 (기본 now+7days)
+ */
+async function testCreatePassword(deviceId, password = '123456', keyIndex = 1,
+                                  effectiveTime = null, invalidTime = null) {
   const did = deviceId || DEFAULT_DEVICE;
   const now = Math.floor(Date.now() / 1000);
-  // 7일 전 ~ 7일 후로 설정 → 시간대/시계 오차를 완전히 무력화
-  const effectiveTime = now - 7 * 86400;
-  const invalidTime   = now + 7 * 86400;
+  const eff = effectiveTime ?? (now - 7 * 86400);
+  const inv = invalidTime   ?? (now + 7 * 86400);
 
-  const rawHex = buildCreateRaw(password, effectiveTime, invalidTime, keyIndex);
+  const rawHex = buildCreateRaw(password, eff, inv, keyIndex);
   console.log(`[Tuya 진단] unlock_method_create  did=${did}  keyIndex=${keyIndex}  pwd=${password}  raw=${rawHex}`);
 
-  // iot-03 먼저
   let data = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
     commands: [{ code: 'unlock_method_create', value: rawHex }]
   });
@@ -318,7 +361,31 @@ async function testCreatePassword(deviceId, password = '123456', keyIndex = 1) {
       commands: [{ code: 'unlock_method_create', value: rawHex }]
     });
   }
-  return { rawHex, effectiveTime, invalidTime, keyIndex, password, deviceId: did, result: data };
+  return { rawHex, effectiveTime: eff, invalidTime: inv, keyIndex, password, deviceId: did, result: data };
+}
+
+/**
+ * ASCII 인코딩으로 임시 비번 등록 (진단용)
+ */
+async function testCreatePasswordASCII(deviceId, password = '654321', keyIndex = 4,
+                                       effectiveTime = null, invalidTime = null) {
+  const did = deviceId || DEFAULT_DEVICE;
+  const now = Math.floor(Date.now() / 1000);
+  const eff = effectiveTime ?? (now - 7 * 86400);
+  const inv = invalidTime   ?? (now + 7 * 86400);
+
+  const rawHex = buildCreateRawASCII(password, eff, inv, keyIndex);
+  console.log(`[Tuya 진단-ASCII] unlock_method_create  did=${did}  keyIndex=${keyIndex}  pwd=${password}  raw=${rawHex}`);
+
+  let data = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+    commands: [{ code: 'unlock_method_create', value: rawHex }]
+  });
+  if (!data.success && data.code === 1108) {
+    data = await tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: rawHex }]
+    });
+  }
+  return { rawHex, effectiveTime: eff, invalidTime: inv, keyIndex, password, deviceId: did, result: data };
 }
 
 // Tuya 설정 여부 확인
@@ -334,6 +401,7 @@ module.exports = {
   getDeviceStatus,
   getDeviceInfo,
   testCreatePassword,
+  testCreatePasswordASCII,
   isTuyaEnabled,
   tuyaRequest,
 };

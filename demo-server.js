@@ -619,6 +619,42 @@ app.get('/api/diag/tuya/online', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #4: BCD/일반 인코딩 차이가 없는 클린 테스트 ──
+// 2026-01-01 ~ 2026-09-09 사용 → 월(1,9)/일(1,9) 모두 한 자리
+// → BCD 인코딩이나 일반 hex나 바이트값이 동일 → 인코딩 의심 제거
+// 비번 654321 슬롯3 / 비번 987654 슬롯4 (ASCII도 병행)
+app.get('/api/diag/tuya/test-clean', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    // 2026-01-01T00:00:00Z  ← BCD/plain 인코딩 완전 동일
+    const effectiveTime = 1767225600;
+    // 2026-09-09T00:00:00Z  ← BCD/plain 인코딩 완전 동일
+    const invalidTime   = 1788912000;
+
+    // ① 현재 방식 (raw digits): 654321, 슬롯 3
+    const r1 = await tuya.testCreatePassword(did, '654321', 3, effectiveTime, invalidTime);
+
+    // ② ASCII 방식 (0x31~0x39): 같은 비번, 슬롯 4
+    const r2 = await tuya.testCreatePasswordASCII(did, '654321', 4, effectiveTime, invalidTime);
+
+    res.json({
+      note: '2026-01-01 ~ 2026-09-09 (BCD=plain 인코딩 동일 날짜)',
+      raw_digits: {
+        instruction: '도어락에서 [654321#] 눌러보세요 (슬롯3)',
+        rawHex: r1.rawHex,
+        result: r1.result
+      },
+      ascii_digits: {
+        instruction: '위 슬롯3 실패 시 도어락에서 [654321#] (슬롯4, ASCII인코딩)',
+        rawHex: r2.rawHex,
+        result: r2.result
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
