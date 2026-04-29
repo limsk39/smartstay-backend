@@ -98,38 +98,74 @@ async function tuyaRequest(method, path, body = null) {
 // ─────────────────────────────────────────────────────────────
 
 /**
- * unlock_method_create Raw 바이트 빌드
- * 포맷: type(1) op(1) methodId(1) pwdLen(1) digits(n) startTime(4) endTime(4)
- *   type    = 0x02 (비밀번호)
- *   op      = 0x01 (등록)
- *   methodId = 1~200 랜덤
- *   pwdLen  = 6
- *   digits  = 각 숫자 0x00~0x09
- *   times   = big-endian uint32 (Unix 초)
+ * unlock_method_create Raw 바이트 빌드 (JTMSPro SP1 공식 포맷)
+ * 출처: Tuya AI (T Sma) 공식 문서 요약
+ *
+ * 총 길이 = 22 + N 바이트
+ *   [0-1]  Peripheral ID : 0x00, keyIndex(1~200)
+ *   [2]    Type          : 0x00 = 기간형(time-bound)
+ *   [3-8]  Start datetime: year(BCD,year-2000), month, day, hour, min, sec
+ *   [9-14] End datetime  : same format
+ *   [15-19] Reserved     : 0x00 x5
+ *   [20]   Use count     : 0x00 = unlimited
+ *   [21]   Password len  : N
+ *   [22~]  Password digits: raw 0x00~0x09
  */
-function buildCreateRaw(password, effectiveTime, invalidTime, methodId) {
-  const digits = password.split('').map(d => parseInt(d, 10));
-  const buf = Buffer.alloc(4 + digits.length + 8);
+function buildCreateRaw(password, effectiveTime, invalidTime, keyIndex) {
+  const startDate = new Date(effectiveTime * 1000);
+  const endDate   = new Date(invalidTime   * 1000);
+  const digits    = password.split('').map(d => parseInt(d, 10));
+  const N         = digits.length;
+  const buf       = Buffer.alloc(22 + N);
   let off = 0;
-  buf[off++] = 0x02;      // 비밀번호 타입
-  buf[off++] = 0x01;      // 등록 操作
-  buf[off++] = methodId;  // 방법 ID
-  buf[off++] = digits.length;
+
+  // [0-1] Peripheral ID
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+
+  // [2] Type: time-bound
+  buf[off++] = 0x00;
+
+  // [3-8] Start datetime (UTC, year BCD)
+  const toBcd = v => ((Math.floor(v / 10) << 4) | (v % 10));
+  buf[off++] = toBcd(startDate.getUTCFullYear() - 2000);
+  buf[off++] = startDate.getUTCMonth() + 1;
+  buf[off++] = startDate.getUTCDate();
+  buf[off++] = startDate.getUTCHours();
+  buf[off++] = startDate.getUTCMinutes();
+  buf[off++] = startDate.getUTCSeconds();
+
+  // [9-14] End datetime (UTC)
+  buf[off++] = toBcd(endDate.getUTCFullYear() - 2000);
+  buf[off++] = endDate.getUTCMonth() + 1;
+  buf[off++] = endDate.getUTCDate();
+  buf[off++] = endDate.getUTCHours();
+  buf[off++] = endDate.getUTCMinutes();
+  buf[off++] = endDate.getUTCSeconds();
+
+  // [15-19] Reserved
+  for (let i = 0; i < 5; i++) buf[off++] = 0x00;
+
+  // [20] Use count: unlimited
+  buf[off++] = 0x00;
+
+  // [21] Password length
+  buf[off++] = N;
+
+  // [22~] Password digits (raw)
   for (const d of digits) buf[off++] = d;
-  buf.writeUInt32BE(effectiveTime, off); off += 4;
-  buf.writeUInt32BE(invalidTime,   off);
+
   return buf.toString('hex').toUpperCase();
 }
 
 /**
  * unlock_method_delete Raw 바이트 빌드
- * 포맷: type(1) op(1) methodId(1)
  */
-function buildDeleteRaw(methodId) {
+function buildDeleteRaw(keyIndex) {
   const buf = Buffer.alloc(3);
-  buf[0] = 0x02;
-  buf[1] = 0x02;   // 삭제 操作
-  buf[2] = methodId;
+  buf[0] = 0x00;
+  buf[1] = keyIndex & 0xFF;
+  buf[2] = 0xFF;   // use count 0xFF = expired (삭제)
   return buf.toString('hex').toUpperCase();
 }
 
