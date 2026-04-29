@@ -655,6 +655,76 @@ app.get('/api/diag/tuya/test-clean', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #5: remote_no_pd_setkey DP로 시도 ────────────
+// unlock_method_create 가 계속 실패 → 이 DP 가 실제 키패드 비번용일 수 있음
+app.get('/api/diag/tuya/test-nopd', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - 86400;           // 어제
+    const end   = now + 7 * 86400;      // 7일 후
+
+    // 4바이트 Big-Endian 헬퍼
+    const b4be = v => v.toString(16).padStart(8,'0').toUpperCase();
+    // 4바이트 Little-Endian 헬퍼
+    const b4le = v => {
+      const b = Buffer.allocUnsafe(4); b.writeUInt32LE(v); return b.toString('hex').toUpperCase();
+    };
+
+    // 포맷 A: op(01)+len(06)+ASCII("123456")+start(4B BE)+end(4B BE)
+    const fmtA = '01' + '06' + '313233343536' + b4be(start) + b4be(end);
+    // 포맷 B: op(01)+len(06)+ASCII+start(4B LE)+end(4B LE)
+    const fmtB = '01' + '06' + '313233343536' + b4le(start) + b4le(end);
+    // 포맷 C: String 방식 — "123456" 을 문자열로 그냥 전달
+    const fmtC = '123456';
+    // 포맷 D: keyIndex(01)+len(06)+raw digits
+    const fmtD = '01' + '06' + '010203040506';
+
+    const send = (path, value) =>
+      tuya.tuyaRequest('POST', path, { commands: [{ code: 'remote_no_pd_setkey', value }] });
+
+    const [rA_iot, rA_leg, rB_iot, rC_iot, rD_iot] = await Promise.all([
+      send(`/v1.0/iot-03/devices/${did}/commands`, fmtA),
+      send(`/v1.0/devices/${did}/commands`,         fmtA),
+      send(`/v1.0/iot-03/devices/${did}/commands`, fmtB),
+      send(`/v1.0/iot-03/devices/${did}/commands`, fmtC),
+      send(`/v1.0/iot-03/devices/${did}/commands`, fmtD),
+    ]);
+
+    res.json({
+      instruction: 'API success 후 도어락에서 [123456#] 눌러보세요',
+      A_BE_iot03:  { hex: fmtA, result: rA_iot },
+      A_BE_legacy: { hex: fmtA, result: rA_leg },
+      B_LE_iot03:  { hex: fmtB, result: rB_iot },
+      C_string:    { value: fmtC, result: rC_iot },
+      D_raw:       { hex: fmtD, result: rD_iot },
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── 핵심 진단 #6: DP 전체 스펙 (타입/형식 확인) ─────────────
+app.get('/api/diag/tuya/spec-detail', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const [spec, func] = await Promise.all([
+      tuya.tuyaRequest('GET', `/v1.0/devices/${did}/specification`),
+      tuya.tuyaRequest('GET', `/v1.0/devices/${did}/functions`),
+    ]);
+    // remote_no_pd_setkey / unlock_method_create 만 추출
+    const interesting = ['remote_no_pd_setkey','unlock_method_create','unlock_method_delete','unlock_temporary'];
+    const filter = (arr) => (arr||[]).filter(d => interesting.includes(d.code));
+    res.json({
+      specification_dps: filter(spec.result?.status).concat(filter(spec.result?.functions)),
+      function_dps:      filter(func.result?.functions),
+      raw_spec: spec,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
