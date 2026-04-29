@@ -725,6 +725,44 @@ app.get('/api/diag/tuya/spec-detail', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #7: 원격 열기 직접 테스트 (인증 없음) ─────────
+// remote_no_pd_setkey 로 등록된 원격잠금해제를 실제로 트리거
+app.get('/api/diag/tuya/unlock-now', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+
+    // 여러 방식 동시 시도
+    const [r1, r2, r3, r4] = await Promise.all([
+      // ① unlock_remote = 0
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+        commands: [{ code: 'unlock_remote', value: 0 }]
+      }),
+      // ② open_close = true
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+        commands: [{ code: 'open_close', value: true }]
+      }),
+      // ③ lock_motor_state = false (잠금 해제)
+      tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+        commands: [{ code: 'lock_motor_state', value: false }]
+      }),
+      // ④ iot-03 경로로 unlock_remote
+      tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+        commands: [{ code: 'unlock_remote', value: 0 }]
+      }),
+    ]);
+
+    res.json({
+      message: '문이 열리면 성공!',
+      unlock_remote_legacy:     r1,
+      open_close_legacy:        r2,
+      lock_motor_false_legacy:  r3,
+      unlock_remote_iot03:      r4,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
