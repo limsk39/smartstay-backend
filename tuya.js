@@ -285,6 +285,42 @@ async function getDeviceStatus(deviceId) {
   return tuyaRequest('GET', `/v1.0/devices/${did}/status`);
 }
 
+/**
+ * 기기 상세 정보 조회 (카테고리, 온라인 여부 등)
+ */
+async function getDeviceInfo(deviceId) {
+  const did = deviceId || DEFAULT_DEVICE;
+  return tuyaRequest('GET', `/v1.0/devices/${did}`);
+}
+
+/**
+ * 광범위 시간 + 고정 keyIndex 로 임시 비번 직접 등록 (진단용)
+ * @param {string} deviceId  - 대상 장치 ID
+ * @param {string} password  - 테스트 비밀번호 (기본 "123456")
+ * @param {number} keyIndex  - 비번 슬롯 번호 (기본 1)
+ */
+async function testCreatePassword(deviceId, password = '123456', keyIndex = 1) {
+  const did = deviceId || DEFAULT_DEVICE;
+  const now = Math.floor(Date.now() / 1000);
+  // 7일 전 ~ 7일 후로 설정 → 시간대/시계 오차를 완전히 무력화
+  const effectiveTime = now - 7 * 86400;
+  const invalidTime   = now + 7 * 86400;
+
+  const rawHex = buildCreateRaw(password, effectiveTime, invalidTime, keyIndex);
+  console.log(`[Tuya 진단] unlock_method_create  did=${did}  keyIndex=${keyIndex}  pwd=${password}  raw=${rawHex}`);
+
+  // iot-03 먼저
+  let data = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+    commands: [{ code: 'unlock_method_create', value: rawHex }]
+  });
+  if (!data.success && data.code === 1108) {
+    data = await tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: rawHex }]
+    });
+  }
+  return { rawHex, effectiveTime, invalidTime, keyIndex, password, deviceId: did, result: data };
+}
+
 // Tuya 설정 여부 확인
 function isTuyaEnabled() {
   return !!(ACCESS_ID && ACCESS_SECRET && DEFAULT_DEVICE);
@@ -296,6 +332,8 @@ module.exports = {
   deleteTempPassword,
   remoteUnlock,
   getDeviceStatus,
+  getDeviceInfo,
+  testCreatePassword,
   isTuyaEnabled,
   tuyaRequest,
 };

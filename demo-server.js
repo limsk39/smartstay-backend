@@ -538,19 +538,82 @@ app.get('/api/diag/tuya/specification', async (req, res) => {
   }
 });
 
-// iot-03 경로로 테스트 명령 전송 (진단용)
-app.get('/api/diag/tuya/test-iot03', async (req, res) => {
+// ─── 핵심 진단 #1: 두 기기 모두 상세 정보 조회 ──────────────
+// 확인사항: online 여부, 카테고리(jtmspro vs ble_gw), 이름
+app.get('/api/diag/tuya/device-info', async (req, res) => {
   try {
-    const did = process.env.TUYA_DEVICE_ID;
-    // 비밀번호 "123456" methodId=1 ASCII 인코딩 테스트
-    const rawHex = '020101063132333435366000000070000000';
-    const [r1, r2] = await Promise.all([
-      tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
-        commands: [{ code: 'unlock_method_create', value: rawHex }]
-      }),
-      tuya.tuyaRequest('GET', `/v1.0/iot-03/devices/${did}/functions`),
+    const did   = process.env.TUYA_DEVICE_ID;
+    const gwDid = process.env.TUYA_GATEWAY_ID;
+
+    const [lockInfo, gwInfo] = await Promise.all([
+      tuya.tuyaRequest('GET', `/v1.0/devices/${did}`),
+      gwDid ? tuya.tuyaRequest('GET', `/v1.0/devices/${gwDid}`) : Promise.resolve({ skipped: true })
     ]);
-    res.json({ iot03_command: r1, iot03_functions: r2, rawHex });
+
+    const summarize = (info, label, id) => ({
+      label,
+      id,
+      name:     info.result?.name,
+      category: info.result?.category,         // jtmspro=도어락, ble_gw 등=게이트웨이
+      online:   info.result?.online,
+      sub:      info.result?.sub,              // true=서브기기(도어락), false=독립기기
+      raw:      info
+    });
+
+    res.json({
+      TUYA_DEVICE_ID_info:   summarize(lockInfo,  'TUYA_DEVICE_ID',  did),
+      TUYA_GATEWAY_ID_info:  summarize(gwInfo,    'TUYA_GATEWAY_ID', gwDid || '(미설정)'),
+      hint: 'category가 jtmspro이고 online=true인 쪽이 도어락입니다.'
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── 핵심 진단 #2: 광범위 시간 + 비번 123456 직접 등록 ───────
+// 시간대/시계 오차를 완전 제거. 도어락에서 123456# 입력해보세요.
+app.get('/api/diag/tuya/test-direct', async (req, res) => {
+  try {
+    const did   = process.env.TUYA_DEVICE_ID;
+    const gwDid = process.env.TUYA_GATEWAY_ID;
+    const password = req.query.pwd || '123456';
+    const keyIndex = parseInt(req.query.slot || '1', 10);
+
+    // ① TUYA_DEVICE_ID로 시도
+    const r1 = await tuya.testCreatePassword(did, password, keyIndex);
+
+    // ② TUYA_GATEWAY_ID로도 시도 (ID가 뒤바뀐 경우 대비)
+    let r2 = null;
+    if (gwDid && gwDid !== did) {
+      r2 = await tuya.testCreatePassword(gwDid, password, keyIndex + 1);
+    }
+
+    res.json({
+      instruction: `도어락 키패드에서 [${password}#] 를 눌러보세요 (슬롯 ${keyIndex})`,
+      test_DEVICE_ID:  { deviceId: did,   ...r1 },
+      test_GATEWAY_ID: r2 ? { deviceId: gwDid, ...r2 } : '(TUYA_GATEWAY_ID 없음)',
+      time_window: '현재±7일 (시간대 오차 무관)',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── 핵심 진단 #3: 기기 온라인 상태 실시간 확인 ──────────────
+app.get('/api/diag/tuya/online', async (req, res) => {
+  try {
+    const did   = process.env.TUYA_DEVICE_ID;
+    const gwDid = process.env.TUYA_GATEWAY_ID;
+
+    const [s1, s2] = await Promise.all([
+      tuya.tuyaRequest('GET', `/v1.0/devices/${did}/status`),
+      gwDid ? tuya.tuyaRequest('GET', `/v1.0/devices/${gwDid}/status`) : Promise.resolve(null)
+    ]);
+
+    res.json({
+      TUYA_DEVICE_ID:  { id: did,   status: s1.result },
+      TUYA_GATEWAY_ID: { id: gwDid, status: s2?.result || '(미설정)' }
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
