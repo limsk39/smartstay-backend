@@ -269,23 +269,41 @@ app.post('/api/payments/confirm', async (req, res) => {
   console.log(`  도어락 비번: ${doorCode}#`);
   console.log(`  전달방법: ${reservation.notifyMethod} → ${reservation.guestPhone}\n`);
 
-  // 🔐 Tuya 임시 비밀번호 등록 (체크인~체크아웃 기간)
+  // 🔐 Tuya 임시 비밀번호 등록 시도 (현재 H5000 펌웨어 호환 이슈로 자동 등록 불가)
+  // → 호스트가 Tuya 앱에서 수동 등록하는 하이브리드 방식
+  reservation.doorCodeRegistered     = false;            // 호스트가 등록 후 true 처리
+  reservation.doorCodeRegisteredAt   = null;
+  reservation.needsManualDoorRegister = true;
+
   try {
     const checkInTs  = Math.floor(new Date(reservation.checkIn).getTime()  / 1000);
     const checkOutTs = Math.floor(new Date(reservation.checkOut).getTime() / 1000);
     const tuyaResult = await tuya.createTempPassword(
-      room?.tuyaDeviceId,
-      reservation.guestName,
-      doorCode,
-      checkInTs,
-      checkOutTs
+      room?.tuyaDeviceId, reservation.guestName, doorCode, checkInTs, checkOutTs
     );
-    if (tuyaResult.success && !tuyaResult.simulated) {
-      reservation.tuyaPasswordId = tuyaResult.result?.id;
-      console.log(`[Tuya] 🔑 도어락 임시 비번 등록 완료 (${doorCode}#)`);
+    // 시뮬레이션 모드(키 없음)는 자동 완료 처리
+    if (tuyaResult.simulated) {
+      reservation.doorCodeRegistered     = true;
+      reservation.doorCodeRegisteredAt   = new Date().toISOString();
+      reservation.needsManualDoorRegister = false;
+      reservation.tuyaPasswordId         = tuyaResult.passwordId || null;
     }
+    // (실연동은 현재 success 응답이 와도 keypad 미반영 → 수동 등록 유지)
   } catch (err) {
-    console.error('[Tuya] 임시 비번 등록 실패:', err.message);
+    console.error('[Tuya] API 호출 실패:', err.message);
+  }
+
+  // 호스트용 콘솔 알림
+  if (reservation.needsManualDoorRegister) {
+    console.log('\n┌─────────────────────────────────────────────┐');
+    console.log('│  🔔 호스트 작업 필요 — Tuya 앱 수동 등록   │');
+    console.log('├─────────────────────────────────────────────┤');
+    console.log(`│  객실:      ${room?.name}`);
+    console.log(`│  예약자:    ${reservation.guestName}`);
+    console.log(`│  비밀번호:  ${doorCode}#`);
+    console.log(`│  체크인:    ${reservation.checkIn}`);
+    console.log(`│  체크아웃:  ${reservation.checkOut}`);
+    console.log('└─────────────────────────────────────────────┘\n');
   }
 
   // 📱 문자 / 카카오 알림 발송
@@ -419,7 +437,15 @@ app.get('/api/admin/reservations', adminAuth, (req, res) => {
   let list = reservations.map(r => {
     const room    = ROOMS.find(rm => rm.id === r.roomId);
     const payment = payments.find(p => p.reservationId === r.id);
-    return { ...r, roomName: room?.name || r.roomId, paymentStatus: payment?.status };
+    return {
+      ...r,
+      roomName:      room?.name || r.roomId,
+      tuyaDeviceId:  room?.tuyaDeviceId,
+      paymentStatus: payment?.status,
+      // 호스트가 한눈에 보도록 도어락 등록 상태 노출
+      doorCodeRegistered:      r.doorCodeRegistered === true,
+      needsManualDoorRegister: r.needsManualDoorRegister === true,
+    };
   }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   if (status) list = list.filter(r => r.status === status);
   res.json({ reservations: list });
@@ -514,6 +540,61 @@ app.get('/api/admin/tuya/status', adminAuth, (req, res) => {
     deviceId: process.env.TUYA_DEVICE_ID ? '설정됨' : '미설정',
     message:  tuya.isTuyaEnabled() ? '✅ Tuya 도어락 연동 활성화' : '⚠️ 환경변수 미설정 (시뮬레이션 모드)',
   });
+});
+
+// ─── 도어락 수동 등록 관리 ──────────────────────────────────
+
+// 도어락 등록 대기 목록 (호스트가 Tuya 앱에서 등록해야 할 예약)
+app.get('/api/admin/door-codes/pending', adminAuth, (req, res) => {
+  const pending = reservations
+    .filter(r =>
+      ['paid', 'confirmed', 'checkin'].includes(r.status) &&
+      r.needsManualDoorRegister === true &&
+      !r.doorCodeRegistered
+    )
+    .map(r => {
+      const room = ROOMS.find(rm => rm.id === r.roomId);
+      return {
+        reservationId: r.id,
+        guestName:     r.guestName,
+        guestPhone:    r.guestPhone,
+        roomId:        r.roomId,
+        roomName:      room?.name || r.roomId,
+        tuyaDeviceId:  room?.tuyaDeviceId,
+        doorCode:      r.doorCode,
+        checkIn:       r.checkIn,
+        checkOut:      r.checkOut,
+        createdAt:     r.createdAt,
+      };
+    })
+    .sort((a, b) => new Date(a.checkIn) - new Date(b.checkIn));
+
+  res.json({ count: pending.length, pending });
+});
+
+// 도어락 등록 완료 처리 (호스트가 Tuya 앱에서 등록 후 클릭)
+app.post('/api/admin/reservations/:id/mark-door-registered', adminAuth, (req, res) => {
+  const reservation = reservations.find(r => r.id === req.params.id);
+  if (!reservation) return res.status(404).json({ error: '예약 없음' });
+
+  reservation.doorCodeRegistered     = true;
+  reservation.doorCodeRegisteredAt   = new Date().toISOString();
+  reservation.needsManualDoorRegister = false;
+
+  console.log(`[관리자] ✅ 도어락 등록 완료 처리: ${reservation.guestName} (${reservation.doorCode}#)`);
+  res.json({ success: true, reservation });
+});
+
+// 도어락 등록 완료 취소 (실수로 처리한 경우)
+app.post('/api/admin/reservations/:id/unmark-door-registered', adminAuth, (req, res) => {
+  const reservation = reservations.find(r => r.id === req.params.id);
+  if (!reservation) return res.status(404).json({ error: '예약 없음' });
+
+  reservation.doorCodeRegistered     = false;
+  reservation.doorCodeRegisteredAt   = null;
+  reservation.needsManualDoorRegister = true;
+
+  res.json({ success: true, reservation });
 });
 
 // 장치 DP 함수 스펙 조회 (진단용 — 인증 없음)
