@@ -878,6 +878,87 @@ app.get('/api/diag/tuya/test-formats', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #10: ★ 실제 발견한 포맷으로 테스트 ★ ─────────
+// Tuya 앱 패킷 캡처로 발견한 진짜 Lockpro H5000 포맷
+// 21+N 바이트: 03 E4 00 01 00 00 [start BE] [end BE] [00×7] [ASCII pwd]
+app.get('/api/diag/tuya/test-real', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const password = req.query.pwd || '789012';
+    const slot = parseInt(req.query.slot || '5', 10);
+    const now = Math.floor(Date.now() / 1000);
+    const start = now;
+    const end = now + 24 * 3600;
+
+    const hexValue = require('./tuya').buildCreateRawSafe?.(password, start, end, slot)
+      || tuya.testCreatePassword;  // fallback (안 쓰임)
+
+    // tuya.js의 함수 직접 호출
+    const tuyaModule = require('./tuya');
+
+    // 여러 DP 코드 동시 시도
+    const dpCodes = [
+      'temp_password_create',
+      'temp_password_set',
+      'set_temp_password',
+      'add_temp_pwd',
+      'remote_no_pd_setkey',
+      'unlock_method_create',
+      'temp_pwd_set',
+      'create_temp_password',
+    ];
+
+    // 실제 hex 값 생성
+    const buildFn = tuyaModule.buildCreateRawSafe;
+    let actualHex;
+    if (typeof buildFn === 'function') {
+      actualHex = buildFn(password, start, end, slot);
+    } else {
+      // tuya.js에서 export 안 됐으면 inline 구현
+      const Buffer = require('buffer').Buffer;
+      const N = password.length;
+      const buf = Buffer.alloc(21 + N);
+      let off = 0;
+      buf[off++] = 0x03; buf[off++] = 0xE4;
+      buf[off++] = 0x00; buf[off++] = slot & 0xFF;
+      buf[off++] = 0x00; buf[off++] = 0x00;
+      buf.writeUInt32BE(start, off); off += 4;
+      buf.writeUInt32BE(end, off); off += 4;
+      for (let i = 0; i < 7; i++) buf[off++] = 0x00;
+      for (const ch of password) buf[off++] = ch.charCodeAt(0);
+      actualHex = buf.toString('hex').toUpperCase();
+    }
+
+    const results = {};
+    for (const code of dpCodes) {
+      try {
+        const r = await tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+          commands: [{ code, value: actualHex }]
+        });
+        results[code] = { success: r.success, code: r.code, msg: r.msg };
+      } catch (e) {
+        results[code] = { error: e.message };
+      }
+    }
+
+    res.json({
+      instruction: `★ 도어락에서 [${password}#] 시도 → 열리면 어떤 code인지 디바이스 로그에서 확인!`,
+      password,
+      slot,
+      hexValue: actualHex,
+      hexLength: actualHex.length / 2 + ' bytes',
+      decodedTimes: {
+        start: new Date(start * 1000).toLocaleString('ko-KR'),
+        end:   new Date(end * 1000).toLocaleString('ko-KR'),
+      },
+      attempted_dp_codes: results,
+      next: 'Tuya 디바이스 로그에서 어떤 code가 Report 응답을 받았는지 확인',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {

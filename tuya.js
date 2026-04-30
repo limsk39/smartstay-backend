@@ -219,6 +219,40 @@ function buildCreateRawV3_Short(password, effectiveTime, invalidTime, keyIndex) 
 }
 
 /**
+ * ★ Lockpro H5000 실제 포맷 (Tuya 앱 패킷 캡처로 발견) ★
+ * 총 21+N 바이트
+ *   [0]    0x03         = 작업: 생성
+ *   [1]    0xE4         = 서브타입(검증된 값)
+ *   [2-3]  0x00 keyIdx  = 슬롯 (BE 16bit)
+ *   [4-5]  0x00 0x00    = 예약
+ *   [6-9]  start (4B BE Unix sec)
+ *   [10-13] end   (4B BE Unix sec)
+ *   [14-20] 0x00 × 7    = 예약
+ *   [21+]  ASCII 비번
+ */
+function buildCreateRawSafe(password, effectiveTime, invalidTime, keyIndex = 1) {
+  const N = password.length;
+  const buf = Buffer.alloc(21 + N);
+  let off = 0;
+
+  buf[off++] = 0x03;
+  buf[off++] = 0xE4;
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = 0x00;
+  buf[off++] = 0x00;
+
+  buf.writeUInt32BE(effectiveTime, off); off += 4;
+  buf.writeUInt32BE(invalidTime, off);   off += 4;
+
+  for (let i = 0; i < 7; i++) buf[off++] = 0x00;
+
+  for (const ch of password) buf[off++] = ch.charCodeAt(0);
+
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
  * 변형 V4: Tuya 표준 [type][schedule][idx][len][ASCII][4B start BE][4B end BE]
  */
 function buildCreateRawV4_TuyaStd(password, effectiveTime, invalidTime, keyIndex) {
@@ -496,6 +530,7 @@ module.exports = {
   testCreatePassword,
   testCreatePasswordASCII,
   testAllFormats,
+  buildCreateRawSafe,
   isTuyaEnabled,
   tuyaRequest,
 };
