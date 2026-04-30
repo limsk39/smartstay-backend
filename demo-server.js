@@ -878,6 +878,40 @@ app.get('/api/diag/tuya/test-formats', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #12: ★ unlock_method_create 단독 + 새 포맷 ★
+// "Creat Temporary Password" 라벨을 받기 위한 시도
+app.get('/api/diag/tuya/test-umc', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const password = req.query.pwd || '258369';
+    const slot = parseInt(req.query.slot || '1', 10);
+    const now = Math.floor(Date.now() / 1000);
+    const start = now;
+    const end = now + 24 * 3600;
+
+    const tuyaModule = require('./tuya');
+    const hexValue = tuyaModule.buildCreateRawSafe(password, start, end, slot);
+
+    // unlock_method_create 만 시도
+    const r1 = await tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: hexValue }]
+    });
+    const r2 = await tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: hexValue }]
+    });
+
+    res.json({
+      instruction: `★ 도어락에서 [${password}#] 시도! unlock_method_create + 새포맷`,
+      password, slot, hexValue,
+      iot03_result: r1,
+      legacy_result: r2,
+      check: 'Tuya 디바이스 로그에서 라벨이 "Creat Temporary Password" 인지 확인',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 핵심 진단 #11: ★ 슬롯 1 고정 + remote_no_pd_setkey 만 ★
 // AHE4 응답이 에러 추정 → 슬롯 1로 고정해서 시도
 app.get('/api/diag/tuya/test-slot1', async (req, res) => {
