@@ -878,6 +878,44 @@ app.get('/api/diag/tuya/test-formats', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #11: ★ 슬롯 1 고정 + remote_no_pd_setkey 만 ★
+// AHE4 응답이 에러 추정 → 슬롯 1로 고정해서 시도
+app.get('/api/diag/tuya/test-slot1', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const password = req.query.pwd || '147258';
+    const slot = 1;  // ★ 앱이 쓰는 값 그대로
+    const now = Math.floor(Date.now() / 1000);
+    const start = now;
+    const end = now + 24 * 3600;
+
+    const tuyaModule = require('./tuya');
+    const buildFn = tuyaModule.buildCreateRawSafe;
+    const hexValue = buildFn(password, start, end, slot);
+
+    // remote_no_pd_setkey 만 사용 (응답 받는 DP)
+    const r1 = await tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'remote_no_pd_setkey', value: hexValue }]
+    });
+    const r2 = await tuya.tuyaRequest('POST', `/v1.0/devices/${did}/commands`, {
+      commands: [{ code: 'remote_no_pd_setkey', value: hexValue }]
+    });
+
+    res.json({
+      instruction: `★ 도어락에서 [${password}#] 시도! 슬롯 1 + 진짜포맷`,
+      password, slot,
+      hexValue,
+      compare_to_app: '앱 성공값: 03E40001000069F1C6D569F31...232311',
+      our_value:     hexValue,
+      iot03_result: r1,
+      legacy_result: r2,
+      next: 'Tuya 로그에서 Report 응답값 확인 — AAAB(=성공) 인지 다른값(=에러) 인지',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 핵심 진단 #10: ★ 실제 발견한 포맷으로 테스트 ★ ─────────
 // Tuya 앱 패킷 캡처로 발견한 진짜 Lockpro H5000 포맷
 // 21+N 바이트: 03 E4 00 01 00 00 [start BE] [end BE] [00×7] [ASCII pwd]
