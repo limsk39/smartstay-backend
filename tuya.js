@@ -572,6 +572,177 @@ async function testByte1Variants(deviceId) {
   return results;
 }
 
+// ─────────────────────────────────────────────────────────────
+// ★★★ 신규 포맷 v5/v6 — 비밀번호 길이 바이트 추가 ★★★
+// 기존 buildCreateRawSafe 의 [20]번 바이트가 0x00 이어서
+// 도어락이 "비번 길이=0" 으로 해석 → 비번 무시 버그 수정
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * V5: 비밀번호 길이 바이트 포함 + ASCII 인코딩 (22+N 바이트)
+ * [0]=03 [1]=E4 [2]=00 [3]=slot [4]=00 [5]=00
+ * [6~9]=start BE [10~13]=end BE
+ * [14~19]=00×6  [20]=len  [21+]=ASCII pwd
+ */
+function buildCreateRawV5_WithLen(password, effectiveTime, invalidTime, keyIndex = 1) {
+  const N = password.length;
+  const buf = Buffer.alloc(22 + N);
+  let off = 0;
+  buf[off++] = 0x03;
+  buf[off++] = 0xE4;
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = 0x00;
+  buf[off++] = 0x00;
+  buf.writeUInt32BE(effectiveTime, off); off += 4;
+  buf.writeUInt32BE(invalidTime, off);   off += 4;
+  for (let i = 0; i < 6; i++) buf[off++] = 0x00;  // 6바이트 예약
+  buf[off++] = N;                                   // ★ 비번 길이
+  for (const ch of password) buf[off++] = ch.charCodeAt(0); // ASCII
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * V6: 비밀번호 길이 바이트 포함 + 원시 숫자(raw digit) 인코딩 (22+N 바이트)
+ * ASCII 아닌 원시값: '1'→0x01, '2'→0x02, ..., '9'→0x09, '0'→0x00
+ */
+function buildCreateRawV6_RawDigit(password, effectiveTime, invalidTime, keyIndex = 1) {
+  const N = password.length;
+  const buf = Buffer.alloc(22 + N);
+  let off = 0;
+  buf[off++] = 0x03;
+  buf[off++] = 0xE4;
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = 0x00;
+  buf[off++] = 0x00;
+  buf.writeUInt32BE(effectiveTime, off); off += 4;
+  buf.writeUInt32BE(invalidTime, off);   off += 4;
+  for (let i = 0; i < 6; i++) buf[off++] = 0x00;
+  buf[off++] = N;                              // ★ 비번 길이
+  for (const ch of password) buf[off++] = parseInt(ch, 10); // ★ 원시값
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * V7: 원시 숫자, 길이 바이트 없음 (기존 buildCreateRawSafe 와 같은 크기)
+ * [20] 자리 = 원시 첫 자릿수 (길이 바이트 위치를 첫 digit 으로 덮어쓰는 우연 방지 확인용)
+ */
+function buildCreateRawV7_RawNoLen(password, effectiveTime, invalidTime, keyIndex = 1) {
+  const N = password.length;
+  const buf = Buffer.alloc(21 + N);
+  let off = 0;
+  buf[off++] = 0x03;
+  buf[off++] = 0xE4;
+  buf[off++] = 0x00;
+  buf[off++] = keyIndex & 0xFF;
+  buf[off++] = 0x00;
+  buf[off++] = 0x00;
+  buf.writeUInt32BE(effectiveTime, off); off += 4;
+  buf.writeUInt32BE(invalidTime, off);   off += 4;
+  for (let i = 0; i < 7; i++) buf[off++] = 0x00;
+  for (const ch of password) buf[off++] = parseInt(ch, 10); // ★ 원시값 (ASCII 아님)
+  return buf.toString('hex').toUpperCase();
+}
+
+/**
+ * byte 0 스캔: 0x00~0x08, byte 1 = 0xE4 고정
+ * 비번: 30[slot 4자리], 슬롯 30~38
+ */
+async function testByte0Variants(deviceId) {
+  const did = deviceId || DEFAULT_DEVICE;
+  const now = Math.floor(Date.now() / 1000);
+  const start = now;
+  const end = now + 24 * 3600;
+  const results = [];
+
+  for (let i = 0; i <= 8; i++) {
+    const byte0 = i;
+    const slot  = 30 + i;
+    const password = '30' + slot.toString().padStart(4, '0');
+    const N = password.length;
+    const buf = Buffer.alloc(22 + N);
+    let off = 0;
+    buf[off++] = byte0;          // ★ 변경 대상 (0x00~0x08)
+    buf[off++] = 0xE4;           // byte 1 고정
+    buf[off++] = 0x00;
+    buf[off++] = slot & 0xFF;
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+    buf.writeUInt32BE(start, off); off += 4;
+    buf.writeUInt32BE(end, off);   off += 4;
+    for (let j = 0; j < 6; j++) buf[off++] = 0x00;
+    buf[off++] = N;              // ★ 비번 길이 포함
+    for (const ch of password) buf[off++] = ch.charCodeAt(0);
+    const hex = buf.toString('hex').toUpperCase();
+
+    const r = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: hex }]
+    });
+    results.push({
+      byte0: '0x' + byte0.toString(16).padStart(2, '0').toUpperCase(),
+      slot, password,
+      keypadInput: password + '#',
+      hex,
+      success: r.success,
+      code: r.code,
+    });
+    await new Promise(res => setTimeout(res, 800));
+  }
+  return results;
+}
+
+/**
+ * 길이 바이트 포함 포맷 vs 원시 숫자 포맷 동시 테스트
+ * 비번: 400001(V5) / 400002(V6) / 400003(V7)
+ */
+async function testWithLengthByte(deviceId) {
+  const did = deviceId || DEFAULT_DEVICE;
+  const now = Math.floor(Date.now() / 1000);
+  const start = now;
+  const end   = now + 24 * 3600;
+
+  const tests = [
+    { fn: buildCreateRawV5_WithLen,  label: 'V5_len+ascii',    pwd: '400001', slot: 41 },
+    { fn: buildCreateRawV6_RawDigit, label: 'V6_len+rawdigit', pwd: '400002', slot: 42 },
+    { fn: buildCreateRawV7_RawNoLen, label: 'V7_rawdigit_nolen', pwd: '400003', slot: 43 },
+  ];
+
+  const results = {};
+  for (const t of tests) {
+    const hex = t.fn(t.pwd, start, end, t.slot);
+    // unlock_method_create 로 전송
+    const r_umc = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: hex }]
+    });
+    // remote_no_pd_setkey 로도 전송
+    const r_nopd = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'remote_no_pd_setkey', value: hex }]
+    });
+    results[t.label] = {
+      hex, byteLen: hex.length / 2,
+      pwd: t.pwd, slot: t.slot,
+      keypadInput: t.pwd + '#',
+      unlock_method_create: { success: r_umc.success, code: r_umc.code },
+      remote_no_pd_setkey:  { success: r_nopd.success, code: r_nopd.code },
+    };
+    await new Promise(res => setTimeout(res, 500));
+  }
+  return results;
+}
+
+/**
+ * 장치 로그 조회 (최근 24시간 명령 기록)
+ */
+async function getDeviceLogs(deviceId, size = 30) {
+  const did      = deviceId || DEFAULT_DEVICE;
+  const endTime  = Date.now();
+  const startTime = endTime - 24 * 3600 * 1000;
+  return tuyaRequest('GET',
+    `/v1.0/devices/${did}/logs?event_types=6&start_row=0&size=${size}&start_time=${startTime}&end_time=${endTime}`
+  );
+}
+
 module.exports = {
   createTempPassword,
   getTempPasswords,
@@ -583,7 +754,13 @@ module.exports = {
   testCreatePasswordASCII,
   testAllFormats,
   testByte1Variants,
+  testByte0Variants,
+  testWithLengthByte,
+  getDeviceLogs,
   buildCreateRawSafe,
+  buildCreateRawV5_WithLen,
+  buildCreateRawV6_RawDigit,
+  buildCreateRawV7_RawNoLen,
   isTuyaEnabled,
   tuyaRequest,
 };

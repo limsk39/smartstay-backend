@@ -1051,6 +1051,59 @@ app.get('/api/diag/tuya/test-real', async (req, res) => {
   }
 });
 
+// ─── ★ 신규 진단 #14: 길이 바이트 포함 포맷 테스트 ★ ──────
+// 기존 포맷의 [20]=0x00 을 길이(N)로 교체
+// V5=길이+ASCII / V6=길이+원시숫자 / V7=원시숫자(길이없음)
+app.get('/api/diag/tuya/test-length-byte', async (req, res) => {
+  try {
+    const tuyaModule = require('./tuya');
+    const results = await tuyaModule.testWithLengthByte(process.env.TUYA_DEVICE_ID);
+    res.json({
+      title: '★ 비밀번호 길이 바이트 포함 포맷 3종 테스트',
+      background: '기존 포맷 [20]=0x00 → 도어락이 "비번 길이=0"으로 해석 → 비번 무시 가능성',
+      fix: '[20]에 실제 길이(N) 입력 + 원시숫자(ASCII 아닌 0x01~0x09) 시도',
+      instruction: '★★★ 도어락에서 400001# / 400002# / 400003# 차례로 시도!',
+      results,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── ★ 신규 진단 #15: byte 0 스캔 (0x00~0x08) ★ ──────────
+// byte 0 = 0x03(생성) 고정 가정이 틀렸을 수 있음 → 0x00~0x08 탐색
+// 이번엔 길이 바이트 포함 포맷으로 전송
+app.get('/api/diag/tuya/test-byte0-scan', async (req, res) => {
+  try {
+    const tuyaModule = require('./tuya');
+    const results = await tuyaModule.testByte0Variants(process.env.TUYA_DEVICE_ID);
+    res.json({
+      title: '★ byte 0 스캔 (0x00~0x08), byte 1=0xE4 고정, 길이 바이트 포함',
+      instruction: '★★★ 도어락에서 300030# ~ 300038# 차례로 시도!',
+      table: results,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── ★ 신규 진단 #16: 장치 로그 조회 ★ ──────────────────────
+// 실제 명령이 도어락에 도달하는지 Tuya 클라우드 로그로 확인
+app.get('/api/diag/tuya/device-logs', async (req, res) => {
+  try {
+    const tuyaModule = require('./tuya');
+    const size = parseInt(req.query.size || '30');
+    const logs = await tuyaModule.getDeviceLogs(process.env.TUYA_DEVICE_ID, size);
+    res.json({
+      title: '최근 24시간 장치 로그 (명령 전달 여부 확인)',
+      hint: 'event_type=6 이 명령/응답 로그. 도착하면 "dp" 값에 실제 명령이 보임.',
+      logs,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 데모 전용: 현재 예약 현황 출력 ─────────────────────────
 
 app.get('/api/demo/status', (req, res) => {
