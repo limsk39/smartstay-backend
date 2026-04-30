@@ -520,6 +520,58 @@ function isTuyaEnabled() {
   return !!(ACCESS_ID && ACCESS_SECRET && DEFAULT_DEVICE);
 }
 
+/**
+ * byte 1 (0xE4) 변형 자동 탐색
+ * 0xE0~0xEF 16가지 값으로 동일 포맷 명령 전송
+ */
+async function testByte1Variants(deviceId) {
+  const did = deviceId || DEFAULT_DEVICE;
+  const now = Math.floor(Date.now() / 1000);
+  const start = now;
+  const end = now + 24 * 3600;
+
+  const results = [];
+  for (let i = 0; i < 16; i++) {
+    const byte1 = 0xE0 + i;
+    const slot = i + 1;
+    // 비번: "21" + 4자리 슬롯번호 (210001 ~ 210016)
+    const password = '21' + slot.toString().padStart(4, '0');
+
+    const N = password.length;
+    const buf = Buffer.alloc(21 + N);
+    let off = 0;
+    buf[off++] = 0x03;
+    buf[off++] = byte1;        // ★ 변경
+    buf[off++] = 0x00;
+    buf[off++] = slot & 0xFF;  // 슬롯 1~16
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+    buf.writeUInt32BE(start, off); off += 4;
+    buf.writeUInt32BE(end, off);   off += 4;
+    for (let j = 0; j < 7; j++) buf[off++] = 0x00;
+    for (const ch of password) buf[off++] = ch.charCodeAt(0);
+
+    const hex = buf.toString('hex').toUpperCase();
+
+    const r = await tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/commands`, {
+      commands: [{ code: 'unlock_method_create', value: hex }]
+    });
+
+    results.push({
+      byte1: '0x' + byte1.toString(16).toUpperCase(),
+      slot,
+      password,
+      keypadInput: password + '#',
+      success: r.success,
+      code: r.code,
+    });
+
+    // 락이 처리할 시간 (BLE 통신 안정화)
+    await new Promise(res => setTimeout(res, 800));
+  }
+  return results;
+}
+
 module.exports = {
   createTempPassword,
   getTempPasswords,
@@ -530,6 +582,7 @@ module.exports = {
   testCreatePassword,
   testCreatePasswordASCII,
   testAllFormats,
+  testByte1Variants,
   buildCreateRawSafe,
   isTuyaEnabled,
   tuyaRequest,

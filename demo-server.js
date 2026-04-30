@@ -878,6 +878,26 @@ app.get('/api/diag/tuya/test-formats', async (req, res) => {
   }
 });
 
+// ─── 핵심 진단 #13: ★ byte 1 (0xE4) 16가지 값 자동 탐색 ★
+// 어느 byte1 값이 "Creat Temporary Password" 라벨을 받는지 찾기
+app.get('/api/diag/tuya/test-byte1-scan', async (req, res) => {
+  try {
+    const did = process.env.TUYA_DEVICE_ID;
+    const tuyaModule = require('./tuya');
+    const results = await tuyaModule.testByte1Variants(did);
+
+    res.json({
+      instruction: '★ 16개 비번이 슬롯 1~16에 등록 시도됨',
+      next_step_1: '도어락 키패드에서 210001# 부터 210016# 까지 차례로 입력',
+      next_step_2: 'Tuya 디바이스 로그에서 어떤 byte1 값이 "Creat Temporary Password" 라벨을 받았는지 확인',
+      table: results,
+      mapping: '210001=byte1 0xE0 / 210005=0xE4(현재값) / 210016=0xEF',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── 핵심 진단 #12: ★ unlock_method_create 단독 + 새 포맷 ★
 // "Creat Temporary Password" 라벨을 받기 위한 시도
 app.get('/api/diag/tuya/test-umc', async (req, res) => {
