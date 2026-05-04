@@ -1110,26 +1110,52 @@ app.get('/api/diag/tuya/test-smartlock-api', async (req, res) => {
     const encPwdHex = encPwd.toString('hex').toUpperCase();
     step('암호화된 비번', encPwdHex);
 
-    // ── 3단계: 임시 비번 등록 ────────────────────────────────
-    step('3단계: 임시 비번 등록');
-    const body = {
+    // ── 3단계: 여러 경로 + body 형식으로 시도 ───────────────
+    step('3단계: 임시 비번 등록 — 4가지 경로/형식 시도');
+
+    const baseBody = {
       ticket_id,
       password:       encPwdHex,
       name,
       effective_time: now,
       invalid_time:   now + 24 * 3600,
-      password_type:  'ticket',
     };
-    const createResult = await tuya.tuyaRequest('POST', `/v1.0/devices/${did}/door-lock/temp-passwords`, body);
-    step('등록 결과', { success: createResult.success, code: createResult.code });
+
+    const attempts = [
+      // A: legacy 경로 + password_type 없음
+      { label: 'A_legacy_no_type',
+        path: `/v1.0/devices/${did}/door-lock/temp-passwords`,
+        body: baseBody },
+      // B: iot-03 경로 + password_type 없음
+      { label: 'B_iot03_no_type',
+        path: `/v1.0/iot-03/devices/${did}/door-lock/temp-passwords`,
+        body: baseBody },
+      // C: legacy + password_type: 'ticket'
+      { label: 'C_legacy_ticket_type',
+        path: `/v1.0/devices/${did}/door-lock/temp-passwords`,
+        body: { ...baseBody, password_type: 'ticket' } },
+      // D: iot-03 + password_type: 'ticket'
+      { label: 'D_iot03_ticket_type',
+        path: `/v1.0/iot-03/devices/${did}/door-lock/temp-passwords`,
+        body: { ...baseBody, password_type: 'ticket' } },
+    ];
+
+    const results = {};
+    let successLabel = null;
+    for (const a of attempts) {
+      const r = await tuya.tuyaRequest('POST', a.path, a.body);
+      results[a.label] = { success: r.success, code: r.code, msg: r.msg };
+      step(`시도: ${a.label}`, { success: r.success, code: r.code });
+      if (r.success && !successLabel) successLabel = a.label;
+    }
 
     res.json({
-      결론: createResult.success
-        ? `✅ 성공! 도어락에서 [${password}#] 눌러보세요!`
-        : `❌ 등록 실패 (code: ${createResult.code}, msg: ${createResult.msg})`,
+      결론: successLabel
+        ? `✅ [${successLabel}] 성공! 도어락에서 [${password}#] 눌러보세요!`
+        : `❌ 4가지 경로 모두 실패`,
       password,
+      results,
       log,
-      createResult,
     });
 
   } catch (e) {
