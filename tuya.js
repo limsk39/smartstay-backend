@@ -325,7 +325,7 @@ async function getPasswordTicket(deviceId) {
  */
 function decryptTicketKey(ticketKey) {
   const key = Buffer.from(ACCESS_SECRET.substring(0, 16), 'utf8'); // ← ASCII, NOT hex
-  const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
+  const decipher = crypto.createDecipheriv('aes-128-ecb', key, ''); // '' not null (Node 18+)
   decipher.setAutoPadding(false);
   const encrypted = Buffer.from(ticketKey, 'hex');
   const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
@@ -338,7 +338,7 @@ function decryptTicketKey(ticketKey) {
  */
 function encryptPassword(password, decryptedKey) {
   const key = Buffer.from(decryptedKey.padEnd(16, '\x00').substring(0, 16), 'utf8');
-  const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
+  const cipher = crypto.createCipheriv('aes-128-ecb', key, ''); // '' not null (Node 18+)
   cipher.setAutoPadding(true); // PKCS7
   const encrypted = Buffer.concat([
     cipher.update(Buffer.from(password, 'utf8')),

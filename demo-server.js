@@ -1052,56 +1052,84 @@ app.get('/api/diag/tuya/test-real', async (req, res) => {
 });
 
 // ─── ★★★ 핵심 진단 #17: SmartLock 전용 API (ticket + AES) ★★★
-// 지금까지와 완전히 다른 방식 — Raw DP 아님
-// 1) password-ticket 발급  2) AES-128-ECB 암호화  3) temp-passwords 등록
 app.get('/api/diag/tuya/test-smartlock-api', async (req, res) => {
-  try {
-    const tuyaModule = require('./tuya');
-    const did = process.env.TUYA_DEVICE_ID;
-    const password = req.query.pwd || '500001';
-    const name     = req.query.name || 'API테스트';
-    const now      = Math.floor(Date.now() / 1000);
-    const start    = now;
-    const end      = now + 24 * 3600;
+  const did      = process.env.TUYA_DEVICE_ID;
+  const password = req.query.pwd || '500001';
+  const name     = req.query.name || 'API테스트';
+  const now      = Math.floor(Date.now() / 1000);
 
-    // ── 1단계: 티켓 발급 ───────────────────────────────────────
-    const ticketResult = await tuyaModule.getPasswordTicket(did);
+  const log = [];
+  const step = (msg, data) => { log.push({ msg, data }); console.log('[SmartLock]', msg, data || ''); };
+
+  try {
+    step('시작', { did, password });
+
+    // ── 1단계: 티켓 발급 ─────────────────────────────────────
+    step('1단계: 티켓 발급 요청');
+    const ticketResult = await tuya.tuyaRequest('POST', `/v1.0/devices/${did}/door-lock/password-ticket`, {});
+    step('1단계 결과', { success: ticketResult.success, code: ticketResult.code, result: ticketResult.result });
 
     if (!ticketResult.success) {
+      const iot3Result = await tuya.tuyaRequest('POST', `/v1.0/iot-03/devices/${did}/door-lock/password-ticket`, {});
+      step('1단계 iot-03 재시도', { success: iot3Result.success, code: iot3Result.code });
+
       return res.json({
-        step: '1_ticket_failed',
-        hint: ticketResult.code === 1108
-          ? '❌ 이 도어락 카테고리(jtmspro)는 Smart Lock API 미지원 → 다른 방법 필요'
-          : '❌ 티켓 발급 실패',
-        ticketResult,
+        결론: ticketResult.code === 1108 || iot3Result.code === 1108
+          ? '❌ jtmspro 카테고리는 Smart Lock 전용 API 미지원. 다른 방법 필요.'
+          : `❌ 티켓 발급 실패 (code: ${ticketResult.code})`,
+        log,
+        legacy: ticketResult,
+        iot03:  iot3Result,
       });
     }
 
     const { ticket_id, ticket_key } = ticketResult.result;
+    step('티켓 수신', { ticket_id, ticket_key_preview: ticket_key?.substring(0, 8) + '...' });
 
-    // ── 2단계: 복호화 + 암호화 ─────────────────────────────────
-    const decryptedKey  = tuyaModule.decryptTicketKey(ticket_key);
-    const encryptedPwd  = tuyaModule.encryptPassword(password, decryptedKey);
+    // ── 2단계: 복호화 + 암호화 ───────────────────────────────
+    step('2단계: AES 복호화/암호화');
+    const crypto = require('crypto');
+    const secretKey = Buffer.from((process.env.TUYA_ACCESS_SECRET || '').substring(0, 16), 'utf8');
 
-    // ── 3단계: 임시 비번 등록 ──────────────────────────────────
-    const createResult = await tuyaModule.createTempPasswordSmartLock(
-      did, name, password, start, end
-    );
+    const decipher = crypto.createDecipheriv('aes-128-ecb', secretKey, '');
+    decipher.setAutoPadding(false);
+    const encBuf    = Buffer.from(ticket_key, 'hex');
+    const decBuf    = Buffer.concat([decipher.update(encBuf), decipher.final()]);
+    const decKey    = decBuf.toString('utf8').replace(/\x00/g, '');
+    step('복호화된 키 길이', decKey.length);
+
+    const pwdKey    = Buffer.from(decKey.padEnd(16, '\x00').substring(0, 16), 'utf8');
+    const cipher    = crypto.createCipheriv('aes-128-ecb', pwdKey, '');
+    cipher.setAutoPadding(true);
+    const encPwd    = Buffer.concat([cipher.update(Buffer.from(password, 'utf8')), cipher.final()]);
+    const encPwdHex = encPwd.toString('hex').toUpperCase();
+    step('암호화된 비번', encPwdHex);
+
+    // ── 3단계: 임시 비번 등록 ────────────────────────────────
+    step('3단계: 임시 비번 등록');
+    const body = {
+      ticket_id,
+      password:       encPwdHex,
+      name,
+      effective_time: now,
+      invalid_time:   now + 24 * 3600,
+      password_type:  'ticket',
+    };
+    const createResult = await tuya.tuyaRequest('POST', `/v1.0/devices/${did}/door-lock/temp-passwords`, body);
+    step('등록 결과', { success: createResult.success, code: createResult.code });
 
     res.json({
-      title: '★★★ Smart Lock 전용 API 테스트 (ticket+AES 방식)',
-      instruction: createResult.success
+      결론: createResult.success
         ? `✅ 성공! 도어락에서 [${password}#] 눌러보세요!`
-        : `❌ 실패 — code: ${createResult.code}`,
-      steps: {
-        step1_ticket:  { ticket_id, ticket_key: ticket_key.substring(0, 8) + '...' },
-        step2_encrypt: { decryptedKeyLen: decryptedKey.length, encryptedPwd },
-        step3_create:  createResult,
-      },
+        : `❌ 등록 실패 (code: ${createResult.code}, msg: ${createResult.msg})`,
       password,
+      log,
+      createResult,
     });
+
   } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack });
+    step('ERROR', e.message);
+    res.json({ 결론: '❌ 서버 오류', error: e.message, log });
   }
 });
 
