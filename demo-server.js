@@ -1091,16 +1091,21 @@ app.get('/api/diag/tuya/test-smartlock-api', async (req, res) => {
     const crypto = require('crypto');
     const secretKey = Buffer.from((process.env.TUYA_ACCESS_SECRET || '').substring(0, 16), 'utf8');
 
+    // ticket_key 복호화 → 32바이트 Buffer (문자열 변환 금지)
     const decipher = crypto.createDecipheriv('aes-128-ecb', secretKey, '');
     decipher.setAutoPadding(false);
-    const encBuf    = Buffer.from(ticket_key, 'hex');
-    const decBuf    = Buffer.concat([decipher.update(encBuf), decipher.final()]);
-    const decKey    = decBuf.toString('utf8').replace(/\x00/g, '');
-    step('복호화된 키 길이', decKey.length);
+    const encBuf = Buffer.from(ticket_key, 'hex');
+    const decBuf = Buffer.concat([decipher.update(encBuf), decipher.final()]); // 32바이트 raw
+    step('복호화된 키 Buffer 길이(바이트)', decBuf.length);
 
-    const pwdKey    = Buffer.from(decKey.padEnd(16, '\x00').substring(0, 16), 'utf8');
-    const cipher    = crypto.createCipheriv('aes-128-ecb', pwdKey, '');
-    cipher.setAutoPadding(true);
+    // 복호화 결과가 32바이트 → AES-256-ECB, 16바이트 → AES-128-ECB
+    const useAes256 = decBuf.length === 32;
+    const algorithm = useAes256 ? 'aes-256-ecb' : 'aes-128-ecb';
+    const pwdKey    = useAes256 ? decBuf : decBuf.slice(0, 16);
+    step('사용 알고리즘', algorithm);
+
+    const cipher    = crypto.createCipheriv(algorithm, pwdKey, '');
+    cipher.setAutoPadding(true); // PKCS7
     const encPwd    = Buffer.concat([cipher.update(Buffer.from(password, 'utf8')), cipher.final()]);
     const encPwdHex = encPwd.toString('hex').toUpperCase();
     step('암호화된 비번', encPwdHex);

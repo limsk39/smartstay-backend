@@ -323,27 +323,33 @@ async function getPasswordTicket(deviceId) {
  * ticket_key는 ACCESS_SECRET 앞 16바이트로 AES-128-ECB 암호화된 값
  * 주의: key를 HEX가 아닌 UTF-8(ASCII) 문자열로 해석해야 함
  */
+/**
+ * ticket_key 복호화 → 원시 Buffer 반환 (문자열 변환 금지)
+ * 32바이트 반환 → 호출자가 AES-256 또는 앞 16바이트만 AES-128로 사용
+ */
 function decryptTicketKey(ticketKey) {
-  const key = Buffer.from(ACCESS_SECRET.substring(0, 16), 'utf8'); // ← ASCII, NOT hex
-  const decipher = crypto.createDecipheriv('aes-128-ecb', key, ''); // '' not null (Node 18+)
+  const key = Buffer.from(ACCESS_SECRET.substring(0, 16), 'utf8');
+  const decipher = crypto.createDecipheriv('aes-128-ecb', key, '');
   decipher.setAutoPadding(false);
   const encrypted = Buffer.from(ticketKey, 'hex');
-  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  return decrypted.toString('utf8').replace(/\x00/g, ''); // null 패딩 제거
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]); // raw Buffer
 }
 
 /**
- * 3단계: 비밀번호 AES 암호화
- * 복호화된 ticket_key 로 비번을 AES-128-ECB + PKCS7 암호화
+ * 비밀번호 AES 암호화
+ * @param {string} password
+ * @param {Buffer} decryptedKeyBuf - decryptTicketKey() 반환값 (32바이트)
  */
-function encryptPassword(password, decryptedKey) {
-  const key = Buffer.from(decryptedKey.padEnd(16, '\x00').substring(0, 16), 'utf8');
-  const cipher = crypto.createCipheriv('aes-128-ecb', key, ''); // '' not null (Node 18+)
-  cipher.setAutoPadding(true); // PKCS7
-  const encrypted = Buffer.concat([
-    cipher.update(Buffer.from(password, 'utf8')),
-    cipher.final()
-  ]);
+function encryptPassword(password, decryptedKeyBuf) {
+  const buf  = Buffer.isBuffer(decryptedKeyBuf)
+    ? decryptedKeyBuf
+    : Buffer.from(decryptedKeyBuf, 'utf8');
+  // 32바이트 → AES-256, 16바이트 → AES-128
+  const algo = buf.length >= 32 ? 'aes-256-ecb' : 'aes-128-ecb';
+  const key  = buf.length >= 32 ? buf.slice(0, 32) : buf.slice(0, 16);
+  const cipher = crypto.createCipheriv(algo, key, '');
+  cipher.setAutoPadding(true);
+  const encrypted = Buffer.concat([cipher.update(Buffer.from(password, 'utf8')), cipher.final()]);
   return encrypted.toString('hex').toUpperCase();
 }
 
