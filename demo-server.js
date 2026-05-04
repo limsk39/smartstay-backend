@@ -24,6 +24,9 @@ try {
 // Tuya 도어락 연동 로드
 const tuya = require('./tuya');
 
+// SmartThings (Zigbee Edge Driver) 연동 로드
+const smartthings = require('./smartthings');
+
 const TOSS_SECRET_KEY = process.env.TOSS_SECRET_KEY || '';
 const IS_REAL_PAYMENT = TOSS_SECRET_KEY && !TOSS_SECRET_KEY.includes('여기에');
 
@@ -74,7 +77,9 @@ const ROOMS = [
     checkOutTime: '11:00',
     images: [],
     amenities: ['Wi-Fi', '에어컨', 'TV', '냉장고', '드라이기'],
-    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-101'
+    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-101',
+    // SmartThings Zigbee Edge Driver 연동 — 환경변수 SMARTTHINGS_DEVICE_ID_101 또는 공통 SMARTTHINGS_DEVICE_ID
+    smartthingsDeviceId: process.env.SMARTTHINGS_DEVICE_ID_101 || process.env.SMARTTHINGS_DEVICE_ID || ''
   },
   {
     id: 'room-201',
@@ -85,7 +90,8 @@ const ROOMS = [
     checkOutTime: '11:00',
     images: [],
     amenities: ['Wi-Fi', '에어컨', 'TV', '냉장고', '욕조', '드라이기', '전기포트'],
-    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-201'
+    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-201',
+    smartthingsDeviceId: process.env.SMARTTHINGS_DEVICE_ID_201 || process.env.SMARTTHINGS_DEVICE_ID || ''
   },
   {
     id: 'room-301',
@@ -96,7 +102,8 @@ const ROOMS = [
     checkOutTime: '11:00',
     images: [],
     amenities: ['Wi-Fi', '에어컨', 'TV', '냉장고', '욕조', '테라스', '미니바', '드라이기'],
-    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-301'
+    tuyaDeviceId: process.env.TUYA_DEVICE_ID || 'DEMO-DEVICE-301',
+    smartthingsDeviceId: process.env.SMARTTHINGS_DEVICE_ID_301 || process.env.SMARTTHINGS_DEVICE_ID || ''
   }
 ];
 
@@ -269,41 +276,62 @@ app.post('/api/payments/confirm', async (req, res) => {
   console.log(`  도어락 비번: ${doorCode}#`);
   console.log(`  전달방법: ${reservation.notifyMethod} → ${reservation.guestPhone}\n`);
 
-  // 🔐 Tuya 임시 비밀번호 등록 시도 (현재 H5000 펌웨어 호환 이슈로 자동 등록 불가)
-  // → 호스트가 Tuya 앱에서 수동 등록하는 하이브리드 방식
-  reservation.doorCodeRegistered     = false;            // 호스트가 등록 후 true 처리
-  reservation.doorCodeRegisteredAt   = null;
-  reservation.needsManualDoorRegister = true;
+  // 🔐 SmartThings Edge Driver를 통한 비밀번호 자동 등록
+  reservation.doorCodeRegistered      = false;
+  reservation.doorCodeRegisteredAt    = null;
+  reservation.needsManualDoorRegister = false;
+  reservation.stCodeSlot              = null;
 
-  try {
-    const checkInTs  = Math.floor(new Date(reservation.checkIn).getTime()  / 1000);
-    const checkOutTs = Math.floor(new Date(reservation.checkOut).getTime() / 1000);
-    const tuyaResult = await tuya.createTempPassword(
-      room?.tuyaDeviceId, reservation.guestName, doorCode, checkInTs, checkOutTs
-    );
-    // 시뮬레이션 모드(키 없음)는 자동 완료 처리
-    if (tuyaResult.simulated) {
-      reservation.doorCodeRegistered     = true;
-      reservation.doorCodeRegisteredAt   = new Date().toISOString();
-      reservation.needsManualDoorRegister = false;
-      reservation.tuyaPasswordId         = tuyaResult.passwordId || null;
+  const stDeviceId = room?.smartthingsDeviceId;
+
+  if (stDeviceId || smartthings.isSmartThingsEnabled()) {
+    try {
+      // 예약 ID → 슬롯 번호 결정 (1~99)
+      const slot = smartthings.reservationToSlot(reservation.id);
+      reservation.stCodeSlot = slot;
+
+      const stResult = await smartthings.setCode(
+        stDeviceId,
+        slot,
+        doorCode,
+        reservation.guestName
+      );
+
+      if (stResult.simulated) {
+        // 시뮬레이션 모드 (SmartThings 토큰 없음) → 즉시 완료 처리
+        reservation.doorCodeRegistered     = true;
+        reservation.doorCodeRegisteredAt   = new Date().toISOString();
+        reservation.needsManualDoorRegister = false;
+        console.log(`[SmartThings] 🧪 시뮬레이션: slot=${slot}, code=${doorCode}`);
+      } else {
+        // 실연동 성공 → Edge Driver가 Zigbee 명령 전송 완료
+        reservation.doorCodeRegistered     = true;
+        reservation.doorCodeRegisteredAt   = new Date().toISOString();
+        reservation.needsManualDoorRegister = false;
+        console.log(`[SmartThings] ✅ 비번 등록 완료: slot=${slot}, code=${doorCode}#`);
+      }
+    } catch (err) {
+      console.error('[SmartThings] ❌ setCode 실패:', err.message);
+      // SmartThings 실패 시 수동 등록 필요로 전환
+      reservation.needsManualDoorRegister = true;
     }
-    // (실연동은 현재 success 응답이 와도 keypad 미반영 → 수동 등록 유지)
-  } catch (err) {
-    console.error('[Tuya] API 호출 실패:', err.message);
+  } else {
+    // SmartThings 미설정 → 수동 등록 필요
+    reservation.needsManualDoorRegister = true;
   }
 
-  // 호스트용 콘솔 알림
+  // SmartThings 실패/미설정 시 호스트 콘솔 알림
   if (reservation.needsManualDoorRegister) {
-    console.log('\n┌─────────────────────────────────────────────┐');
-    console.log('│  🔔 호스트 작업 필요 — Tuya 앱 수동 등록   │');
-    console.log('├─────────────────────────────────────────────┤');
+    console.log('\n┌─────────────────────────────────────────────────────┐');
+    console.log('│  🔔 호스트 작업 필요 — SmartThings 앱 수동 등록    │');
+    console.log('├─────────────────────────────────────────────────────┤');
     console.log(`│  객실:      ${room?.name}`);
     console.log(`│  예약자:    ${reservation.guestName}`);
     console.log(`│  비밀번호:  ${doorCode}#`);
     console.log(`│  체크인:    ${reservation.checkIn}`);
     console.log(`│  체크아웃:  ${reservation.checkOut}`);
-    console.log('└─────────────────────────────────────────────┘\n');
+    console.log('│  방법: SmartThings 앱 → 도어락 → lockCodes → 추가  │');
+    console.log('└─────────────────────────────────────────────────────┘\n');
   }
 
   // 📱 문자 / 카카오 알림 발송
@@ -383,19 +411,20 @@ app.get('/api/admin/rooms', adminAuth, (req, res) => {
 
 // 객실 추가
 app.post('/api/admin/rooms', adminAuth, (req, res) => {
-  const { name, description, price, checkInTime, checkOutTime, amenities, tuyaDeviceId } = req.body;
+  const { name, description, price, checkInTime, checkOutTime, amenities, tuyaDeviceId, smartthingsDeviceId } = req.body;
   if (!name || !price) return res.status(400).json({ error: '객실명과 요금은 필수입니다.' });
 
   const newRoom = {
-    id:           'room-' + uuidv4().substring(0, 8),
+    id:                   'room-' + uuidv4().substring(0, 8),
     name,
-    description:  description || '',
-    price:        Number(price),
-    checkInTime:  checkInTime  || '15:00',
-    checkOutTime: checkOutTime || '11:00',
-    images:       [],
-    amenities:    amenities || [],
-    tuyaDeviceId: tuyaDeviceId || ''
+    description:          description || '',
+    price:                Number(price),
+    checkInTime:          checkInTime  || '15:00',
+    checkOutTime:         checkOutTime || '11:00',
+    images:               [],
+    amenities:            amenities || [],
+    tuyaDeviceId:         tuyaDeviceId         || '',
+    smartthingsDeviceId:  smartthingsDeviceId  || ''
   };
   ROOMS.push(newRoom);
   console.log(`[관리자] 객실 추가: ${newRoom.name}`);
@@ -407,16 +436,17 @@ app.put('/api/admin/rooms/:id', adminAuth, (req, res) => {
   const idx = ROOMS.findIndex(r => r.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: '객실 없음' });
 
-  const { name, description, price, checkInTime, checkOutTime, amenities, tuyaDeviceId } = req.body;
+  const { name, description, price, checkInTime, checkOutTime, amenities, tuyaDeviceId, smartthingsDeviceId } = req.body;
   ROOMS[idx] = {
     ...ROOMS[idx],
-    ...(name         && { name }),
-    ...(description  !== undefined && { description }),
-    ...(price        && { price: Number(price) }),
-    ...(checkInTime  && { checkInTime }),
-    ...(checkOutTime && { checkOutTime }),
-    ...(amenities    && { amenities }),
-    ...(tuyaDeviceId !== undefined && { tuyaDeviceId })
+    ...(name                    && { name }),
+    ...(description             !== undefined && { description }),
+    ...(price                   && { price: Number(price) }),
+    ...(checkInTime             && { checkInTime }),
+    ...(checkOutTime            && { checkOutTime }),
+    ...(amenities               && { amenities }),
+    ...(tuyaDeviceId            !== undefined && { tuyaDeviceId }),
+    ...(smartthingsDeviceId     !== undefined && { smartthingsDeviceId })
   };
   console.log(`[관리자] 객실 수정: ${ROOMS[idx].name}`);
   res.json({ room: ROOMS[idx] });
@@ -469,36 +499,82 @@ app.patch('/api/admin/reservations/:id/status', adminAuth, (req, res) => {
 
 // ─── 관리자: 도어락 원격 제어 ────────────────────────────────
 
-// 원격 잠금 해제
+// 원격 잠금 해제 (SmartThings 우선, Tuya 폴백)
 app.post('/api/admin/rooms/:id/unlock', adminAuth, async (req, res) => {
   const room = ROOMS.find(r => r.id === req.params.id);
   if (!room) return res.status(404).json({ error: '객실 없음' });
 
+  // SmartThings 연동 시도
+  if (room.smartthingsDeviceId || smartthings.isSmartThingsEnabled()) {
+    try {
+      const result = await smartthings.remoteUnlock(room.smartthingsDeviceId);
+      if (result.simulated) {
+        return res.json({ success: true, simulated: true, via: 'smartthings', message: '시뮬레이션: 잠금 해제됨' });
+      }
+      return res.json({ success: true, via: 'smartthings', message: '도어락 해제됨 (SmartThings)' });
+    } catch (err) {
+      console.error('[SmartThings] 원격 해제 실패:', err.message);
+    }
+  }
+
+  // SmartThings 실패 시 Tuya 폴백
   try {
     const result = await tuya.remoteUnlock(room.tuyaDeviceId);
     if (result.simulated) {
-      return res.json({ success: true, simulated: true, message: '시뮬레이션: 잠금 해제됨' });
+      return res.json({ success: true, simulated: true, via: 'tuya', message: '시뮬레이션: 잠금 해제됨' });
     }
-    res.json({ success: result.success, message: '도어락 해제됨' });
+    res.json({ success: result.success, via: 'tuya', message: '도어락 해제됨 (Tuya)' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 도어락 상태 확인
+// 도어락 상태 확인 (SmartThings 우선)
 app.get('/api/admin/rooms/:id/door-status', adminAuth, async (req, res) => {
   const room = ROOMS.find(r => r.id === req.params.id);
   if (!room) return res.status(404).json({ error: '객실 없음' });
 
+  // SmartThings 상태 조회 시도
+  if (room.smartthingsDeviceId || smartthings.isSmartThingsEnabled()) {
+    try {
+      const status = await smartthings.getDeviceStatus(room.smartthingsDeviceId);
+      return res.json({
+        success: true,
+        via: 'smartthings',
+        lock:       status?.lock?.lock?.value      || 'unknown',
+        battery:    status?.battery?.battery?.value ?? null,
+        lockCodes:  status?.lockCodes?.lockCodes?.value || {},
+        stEnabled:  smartthings.isSmartThingsEnabled(),
+        simulated:  status?.simulated || false,
+      });
+    } catch (err) {
+      console.error('[SmartThings] 상태 조회 실패:', err.message);
+    }
+  }
+
+  // SmartThings 실패 시 Tuya 폴백
   try {
     const result = await tuya.getDeviceStatus(room.tuyaDeviceId);
-    res.json({ success: true, status: result.result, tuyaEnabled: tuya.isTuyaEnabled() });
+    res.json({ success: true, via: 'tuya', status: result.result, tuyaEnabled: tuya.isTuyaEnabled() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 임시 비밀번호 목록 조회
+// 등록된 코드 목록 조회 (SmartThings lockCodes)
+app.get('/api/admin/rooms/:id/lock-codes', adminAuth, async (req, res) => {
+  const room = ROOMS.find(r => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: '객실 없음' });
+
+  try {
+    const codes = await smartthings.getLockCodes(room.smartthingsDeviceId);
+    res.json({ success: true, codes, stEnabled: smartthings.isSmartThingsEnabled() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 임시 비밀번호 목록 조회 (하위 호환 — Tuya)
 app.get('/api/admin/rooms/:id/temp-passwords', adminAuth, async (req, res) => {
   const room = ROOMS.find(r => r.id === req.params.id);
   if (!room) return res.status(404).json({ error: '객실 없음' });
@@ -519,12 +595,23 @@ app.post('/api/admin/reservations/:id/checkout', adminAuth, async (req, res) => 
   const room = ROOMS.find(r => r.id === reservation.roomId);
   reservation.status = 'checked_out';
 
-  // Tuya 임시 비번 삭제
+  // SmartThings Edge Driver로 비번 삭제
+  if (reservation.stCodeSlot) {
+    try {
+      await smartthings.deleteCode(room?.smartthingsDeviceId, reservation.stCodeSlot);
+      console.log(`[SmartThings] 🗑️ 체크아웃 비번 삭제: ${reservation.guestName} (slot=${reservation.stCodeSlot})`);
+      reservation.doorCodeRegistered = false;
+      reservation.stCodeSlot         = null;
+    } catch (err) {
+      console.error('[SmartThings] 비번 삭제 실패:', err.message);
+    }
+  }
+
+  // 구형 Tuya 임시 비번도 있으면 삭제 (하위 호환)
   if (reservation.tuyaPasswordId) {
     try {
       await tuya.deleteTempPassword(room?.tuyaDeviceId, reservation.tuyaPasswordId);
       reservation.tuyaPasswordId = null;
-      console.log(`[Tuya] 🗑️ 체크아웃 임시 비번 삭제: ${reservation.guestName}`);
     } catch (err) {
       console.error('[Tuya] 임시 비번 삭제 실패:', err.message);
     }
@@ -540,6 +627,28 @@ app.get('/api/admin/tuya/status', adminAuth, (req, res) => {
     deviceId: process.env.TUYA_DEVICE_ID ? '설정됨' : '미설정',
     message:  tuya.isTuyaEnabled() ? '✅ Tuya 도어락 연동 활성화' : '⚠️ 환경변수 미설정 (시뮬레이션 모드)',
   });
+});
+
+// SmartThings 연동 상태 확인
+app.get('/api/admin/smartthings/status', adminAuth, (req, res) => {
+  res.json({
+    enabled:  smartthings.isSmartThingsEnabled(),
+    token:    process.env.SMARTTHINGS_TOKEN   ? '✅ 설정됨' : '❌ 미설정 (SMARTTHINGS_TOKEN)',
+    deviceId: process.env.SMARTTHINGS_DEVICE_ID ? '✅ 설정됨' : '❌ 미설정 (SMARTTHINGS_DEVICE_ID)',
+    message:  smartthings.isSmartThingsEnabled()
+      ? '✅ SmartThings Edge Driver 연동 활성화'
+      : '⚠️ 환경변수 미설정 — SMARTTHINGS_TOKEN + SMARTTHINGS_DEVICE_ID 필요',
+  });
+});
+
+// SmartThings 도어락 기기 정보 조회 (진단용)
+app.get('/api/admin/smartthings/device-info', adminAuth, async (req, res) => {
+  try {
+    const info = await smartthings.getDeviceInfo(process.env.SMARTTHINGS_DEVICE_ID);
+    res.json({ success: true, info });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── 도어락 수동 등록 관리 ──────────────────────────────────
@@ -1245,7 +1354,8 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('  📦 샘플 객실: 3개 등록됨');
   console.log(`  💳 결제: ${IS_REAL_PAYMENT ? '✅ 토스페이먼츠 실결제 모드' : '🧪 데모 모드 (자동 승인)'}`);
-  console.log(`  🔐 도어락: ${tuya.isTuyaEnabled() ? '✅ Tuya IoT 연동 (락프로 H5000)' : '🧪 시뮬레이션 모드 (TUYA 키 없음)'}`);
+  console.log(`  🔐 SmartThings: ${smartthings.isSmartThingsEnabled() ? '✅ Zigbee Edge Driver 연동 (락프로 H5000)' : '🧪 시뮬레이션 모드 (SMARTTHINGS_TOKEN 없음)'}`);
+  console.log(`  🔐 Tuya (구):   ${tuya.isTuyaEnabled() ? '✅ Tuya IoT 연동' : '⚪ 미설정 (비활성)'}`);
   console.log('  📱 SMS/카카오: 서버 콘솔에 출력');
   console.log('');
   console.log('  [데모 현황] http://localhost:3000/api/demo/status');
