@@ -1051,6 +1051,60 @@ app.get('/api/diag/tuya/test-real', async (req, res) => {
   }
 });
 
+// ─── ★★★ 핵심 진단 #17: SmartLock 전용 API (ticket + AES) ★★★
+// 지금까지와 완전히 다른 방식 — Raw DP 아님
+// 1) password-ticket 발급  2) AES-128-ECB 암호화  3) temp-passwords 등록
+app.get('/api/diag/tuya/test-smartlock-api', async (req, res) => {
+  try {
+    const tuyaModule = require('./tuya');
+    const did = process.env.TUYA_DEVICE_ID;
+    const password = req.query.pwd || '500001';
+    const name     = req.query.name || 'API테스트';
+    const now      = Math.floor(Date.now() / 1000);
+    const start    = now;
+    const end      = now + 24 * 3600;
+
+    // ── 1단계: 티켓 발급 ───────────────────────────────────────
+    const ticketResult = await tuyaModule.getPasswordTicket(did);
+
+    if (!ticketResult.success) {
+      return res.json({
+        step: '1_ticket_failed',
+        hint: ticketResult.code === 1108
+          ? '❌ 이 도어락 카테고리(jtmspro)는 Smart Lock API 미지원 → 다른 방법 필요'
+          : '❌ 티켓 발급 실패',
+        ticketResult,
+      });
+    }
+
+    const { ticket_id, ticket_key } = ticketResult.result;
+
+    // ── 2단계: 복호화 + 암호화 ─────────────────────────────────
+    const decryptedKey  = tuyaModule.decryptTicketKey(ticket_key);
+    const encryptedPwd  = tuyaModule.encryptPassword(password, decryptedKey);
+
+    // ── 3단계: 임시 비번 등록 ──────────────────────────────────
+    const createResult = await tuyaModule.createTempPasswordSmartLock(
+      did, name, password, start, end
+    );
+
+    res.json({
+      title: '★★★ Smart Lock 전용 API 테스트 (ticket+AES 방식)',
+      instruction: createResult.success
+        ? `✅ 성공! 도어락에서 [${password}#] 눌러보세요!`
+        : `❌ 실패 — code: ${createResult.code}`,
+      steps: {
+        step1_ticket:  { ticket_id, ticket_key: ticket_key.substring(0, 8) + '...' },
+        step2_encrypt: { decryptedKeyLen: decryptedKey.length, encryptedPwd },
+        step3_create:  createResult,
+      },
+      password,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
 // ─── ★ 신규 진단 #14: 길이 바이트 포함 포맷 테스트 ★ ──────
 // 기존 포맷의 [20]=0x00 을 길이(N)로 교체
 // V5=길이+ASCII / V6=길이+원시숫자 / V7=원시숫자(길이없음)
